@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- QuickTime `text` sample entries are `mov_text`, as FFmpeg's
+  `ff_codec_movsubtitle_tags` maps them; `text` was its own codec id,
+  which belongs to FFmpeg's raw text subtitles.
 - AAC could not be muxed into MP4: an AAC stream without extradata was
   refused ("missing extradata"), and ADTS-framed packets would have
   been stored with their headers in `mdat`. The muxers (plain,
