@@ -8,14 +8,15 @@
 //!
 //! `next_packet` then serves them in order by seeking into the mdat.
 
+mod audio_trim;
 mod video_config;
 
 use std::collections::HashSet;
 use std::io::SeekFrom;
 
 use oxideav_core::{
-    CodecId, CodecParameters, CodecResolver, CodecTag, Error, MediaType, Packet, ProbeContext,
-    Result, SampleFormat, StreamInfo, TimeBase,
+    AudioTrim, CodecId, CodecParameters, CodecResolver, CodecTag, Error, MediaType, Packet,
+    PacketMetadata, ProbeContext, Result, SampleFormat, StreamInfo, TimeBase,
 };
 use oxideav_core::{Demuxer, ReadSeek};
 
@@ -263,9 +264,12 @@ pub fn open_typed(mut input: Box<dyn ReadSeek>, codecs: &dyn CodecResolver) -> R
 
     let mut streams: Vec<StreamInfo> = Vec::with_capacity(parsed.tracks.len());
     let mut samples: Vec<SampleRef> = Vec::new();
+    let mut stbl_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(parsed.tracks.len());
     for (i, t) in parsed.tracks.iter().enumerate() {
         streams.push(build_stream_info(i as u32, t, codecs));
+        let start = samples.len();
         expand_samples(t, i as u32, &mut samples)?;
+        stbl_ranges.push(start..samples.len());
     }
 
     // Per-track running base_media_decode_time, used when a fragment's
@@ -278,6 +282,22 @@ pub fn open_typed(mut input: Box<dyn ReadSeek>, codecs: &dyn CodecResolver) -> R
         if end > next_dts[idx] {
             next_dts[idx] = end;
         }
+    }
+
+    // Audio encoder delay and end padding from the edit list, the sample
+    // table and iTunSMPB (see `audio_trim`); last track first, so the
+    // samples a track drops past its edit leave earlier ranges in place.
+    let smpb = |i: usize| {
+        let (track, value) = parsed.itunsmpb.as_ref()?;
+        (*track == i).then(|| audio_trim::parse_smpb(value)).flatten()
+    };
+    let fragmented = !moofs.is_empty();
+    let mut seek_trims: Vec<Option<audio_trim::SeekTrim>> = vec![None; parsed.tracks.len()];
+    for (i, t) in parsed.tracks.iter().enumerate().rev() {
+        let codec = streams[i].params.codec_id.as_str();
+        let range = stbl_ranges[i].clone();
+        seek_trims[i] =
+            audio_trim::sample_table(t, codec, parsed.movie_timescale, smpb(i), fragmented, &mut samples, range);
     }
 
     let mut senc_records: Vec<SencRecord> = Vec::new();
@@ -345,6 +365,15 @@ pub fn open_typed(mut input: Box<dyn ReadSeek>, codecs: &dyn CodecResolver) -> R
             };
         }
         moof_earliest.push(best);
+    }
+
+    // Audio tracks whose samples all come from fragments: the first one
+    // skips the AAC priming (see `audio_trim::fragments`).
+    for (i, t) in parsed.tracks.iter().enumerate() {
+        if stbl_ranges[i].is_empty() {
+            let codec = streams[i].params.codec_id.as_str();
+            seek_trims[i] = audio_trim::fragments(t, i as u32, codec, smpb(i), &mut samples);
+        }
     }
 
     samples.sort_by_key(|s| s.offset);
@@ -860,6 +889,9 @@ pub fn open_typed(mut input: Box<dyn ReadSeek>, codecs: &dyn CodecResolver) -> R
             .map(|t| t.elst.iter().map(elst_entry_to_public).collect())
             .collect(),
         last_sdi: None,
+        seek_pending: vec![false; seek_trims.len()],
+        seek_trims,
+        packet_metadata: PacketMetadata::default(),
     })
 }
 
@@ -1521,6 +1553,10 @@ struct ParsedMoov {
     /// downstream tooling can reach them through
     /// `Mp4Demuxer::treps()` or the flat `trep_<n>` metadata keys.
     treps: Vec<TrepRecord>,
+    /// The last iTunSMPB gapless tag (`ilst/----`, com.apple.iTunes) and
+    /// the index of the track parsed last before it, which it describes
+    /// (as FFmpeg's mov demuxer applies it).
+    itunsmpb: Option<(usize, String)>,
 }
 
 /// Per-track info collected from moov.
@@ -2947,13 +2983,19 @@ fn parse_moov(moov: &[u8], file_size: u64) -> Result<ParsedMoov> {
                 let body = read_bytes_vec(&mut cur, psz)?;
                 parse_mvhd(&body, &mut out)?;
             }
-            UDTA => {
+            UDTA | META => {
                 let body = read_bytes_vec(&mut cur, psz)?;
-                parse_udta(&body, &mut out.metadata);
-            }
-            META => {
-                let body = read_bytes_vec(&mut cur, psz)?;
-                parse_meta(&body, &mut out.metadata);
+                let before = out.metadata.len();
+                if hdr.fourcc == UDTA {
+                    parse_udta(&body, &mut out.metadata);
+                } else {
+                    parse_meta(&body, &mut out.metadata);
+                }
+                // iTunSMPB describes the stream FFmpeg created last.
+                let tag = out.metadata[before..].iter().rev().find(|(k, _)| k == "iTunSMPB");
+                if let (Some((_, value)), Some(track)) = (tag, out.tracks.len().checked_sub(1)) {
+                    out.itunsmpb = Some((track, value.clone()));
+                }
             }
             MVEX => {
                 let body = read_bytes_vec(&mut cur, psz)?;
@@ -3264,6 +3306,12 @@ fn parse_ilst(body: &[u8], metadata: &mut Vec<(String, String)>) {
         cur.set_position((start + psz) as u64);
         // Recurse one level: look for a `data` child.
         let item = &body[start..start + psz];
+        if &hdr.fourcc == b"----" {
+            if let Some(value) = parse_itunsmpb(item) {
+                metadata.push(("iTunSMPB".into(), value));
+            }
+            continue;
+        }
         let key = ilst_key_for(&hdr.fourcc);
         if key.is_none() {
             continue;
@@ -3293,6 +3341,44 @@ fn parse_ilst(body: &[u8], metadata: &mut Vec<(String, String)>) {
                 }
             }
         }
+    }
+}
+
+/// The value of an `ilst` freeform (`----`) item named `iTunSMPB`: up to
+/// three children `mean` / `name` / `data` (each a size, a type, four bytes
+/// of flags, then its bytes; `data` also skips its locale), read as FFmpeg's
+/// `mov_read_custom` reads them. Strings end at their first NUL.
+fn parse_itunsmpb(item: &[u8]) -> Option<String> {
+    let mut fields: [Option<&[u8]>; 3] = [None; 3];
+    let mut at = 0usize;
+    for _ in 0..3 {
+        if item.len().saturating_sub(at) <= 12 {
+            break;
+        }
+        let len = u32::from_be_bytes(item[at..at + 4].try_into().ok()?) as usize;
+        let tag = &item[at + 4..at + 8];
+        let body = at + 12;
+        if len < 12 || len - 12 > item.len() - body {
+            break;
+        }
+        let (slot, bytes) = match tag {
+            b"mean" => (0, &item[body..body + len - 12]),
+            b"name" => (1, &item[body..body + len - 12]),
+            b"data" if len - 12 > 4 => (2, &item[body + 4..body + len - 12]),
+            _ => break,
+        };
+        if fields[slot].is_some() {
+            break;
+        }
+        fields[slot] = Some(bytes);
+        at = body + len - 12;
+    }
+    let c_str = |b: &[u8]| b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())].to_vec();
+    match fields {
+        [Some(_), Some(name), Some(value)] if c_str(name) == b"iTunSMPB" => {
+            Some(String::from_utf8_lossy(&c_str(value)).into_owned())
+        }
+        _ => None,
     }
 }
 
@@ -10549,6 +10635,8 @@ fn parse_traf(
                 keyframe,
                 discard: !presented,
                 sdi: state.sample_description_index,
+                trim_skip: 0,
+                trim_discard: 0,
             });
 
             sample_off = sample_off.saturating_add(size as u64);
@@ -11632,6 +11720,11 @@ struct SampleRef {
     /// (§8.8.7) for fragment samples. Decode always uses entry [0];
     /// this is surfaced so callers can detect a mid-stream switch.
     sdi: u32,
+    /// Decoded samples (media timescale) this audio packet's decoder
+    /// output starts with that are encoder delay, and ends with that are
+    /// padding: `PacketMetadata::audio_trim` (see `audio_trim`).
+    trim_skip: u32,
+    trim_discard: u32,
 }
 
 fn expand_samples(t: &Track, track_idx: u32, out: &mut Vec<SampleRef>) -> Result<()> {
@@ -11787,6 +11880,8 @@ fn expand_samples(t: &Track, track_idx: u32, out: &mut Vec<SampleRef>) -> Result
             keyframe,
             discard: !presented,
             sdi: sdi_of_sample[i],
+            trim_skip: 0,
+            trim_discard: 0,
         });
     }
     Ok(())
@@ -13402,6 +13497,15 @@ pub struct Mp4Demuxer {
     /// by `next_packet` (`None` before the first packet). See
     /// [`Self::sample_description_index_of_last_packet`].
     last_sdi: Option<u32>,
+    /// Per track: what a seek's landing packet skips (audio tracks with
+    /// encoder delay, see `audio_trim`).
+    seek_trims: Vec<Option<audio_trim::SeekTrim>>,
+    /// Per track: a seek happened and the track's next packet has not
+    /// been read yet.
+    seek_pending: Vec<bool>,
+    /// `Demuxer::packet_metadata` of the packet read last; cleared before
+    /// every read and seek.
+    packet_metadata: PacketMetadata,
 }
 
 impl Mp4Demuxer {
@@ -13873,6 +13977,7 @@ impl Demuxer for Mp4Demuxer {
     }
 
     fn next_packet(&mut self) -> Result<Packet> {
+        self.packet_metadata = PacketMetadata::default();
         if self.cursor >= self.samples.len() {
             return Err(Error::Eof);
         }
@@ -13914,10 +14019,56 @@ impl Demuxer for Mp4Demuxer {
         // / excised ranges) is delivered for decoding but flagged so a
         // player drops the decoded output instead of showing it.
         pkt.flags.discard = s.discard;
+        // Encoder delay and end padding (see `audio_trim`); after a seek a
+        // track's first packet skips what priming lies ahead of it.
+        let track = s.track_idx as usize;
+        let mut skip = s.trim_skip;
+        if self.seek_pending.get(track).copied().unwrap_or(false) {
+            self.seek_pending[track] = false;
+            if let Some(trim) = self.seek_trims[track] {
+                skip = trim.skip_at(s.dts);
+            }
+        }
+        let rate = self.track_timescales.get(track).copied().unwrap_or(0);
+        if (skip > 0 || s.trim_discard > 0) && rate > 0 {
+            self.packet_metadata.audio_trim =
+                Some(AudioTrim { skip_samples: skip, discard_padding: s.trim_discard, sample_rate: rate });
+        }
         Ok(pkt)
     }
 
     fn seek_to(&mut self, stream_index: u32, pts: i64) -> Result<i64> {
+        self.packet_metadata = PacketMetadata::default();
+        let landed = self.seek_cursor(stream_index, pts)?;
+        // Each audio track's next packet skips the priming still ahead of
+        // it (mov.c `mov_get_skip_samples`).
+        for (pending, trim) in self.seek_pending.iter_mut().zip(&self.seek_trims) {
+            *pending = trim.is_some();
+        }
+        Ok(landed)
+    }
+
+    fn packet_metadata(&self) -> PacketMetadata {
+        self.packet_metadata.clone()
+    }
+
+
+    fn metadata(&self) -> &[(String, String)] {
+        &self.metadata
+    }
+
+    fn duration_micros(&self) -> Option<i64> {
+        if self.duration_micros > 0 {
+            Some(self.duration_micros)
+        } else {
+            None
+        }
+    }
+}
+
+impl Mp4Demuxer {
+    /// Moves the cursor to the sample `seek_to` lands on; returns its pts.
+    fn seek_cursor(&mut self, stream_index: u32, pts: i64) -> Result<i64> {
         if stream_index as usize >= self.streams.len() {
             return Err(Error::invalid(format!(
                 "MP4: stream index {stream_index} out of range"
@@ -14013,20 +14164,6 @@ impl Demuxer for Mp4Demuxer {
         Ok(best_pts)
     }
 
-    fn metadata(&self) -> &[(String, String)] {
-        &self.metadata
-    }
-
-    fn duration_micros(&self) -> Option<i64> {
-        if self.duration_micros > 0 {
-            Some(self.duration_micros)
-        } else {
-            None
-        }
-    }
-}
-
-impl Mp4Demuxer {
     /// Look up the latest tfra entry for `stream_index` whose `time`
     /// is `<= pts`. Returns the `TfraEntry` or `None` when no tfra
     /// covers this track or no entry is at-or-before `pts`.

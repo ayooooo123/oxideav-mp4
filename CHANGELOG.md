@@ -29,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negative PTS (e.g. AAC priming carried over from a trimmed source)
   gets one `elst` entry with `media_time = -first_pts` running to the
   end of the presented range.
+- Audio encoder delay and end padding per packet, as
+  `Demuxer::packet_metadata().audio_trim` in the media timescale, with
+  FFmpeg's (2da55bf mov.c / demux.c) values: the first non-empty edit's
+  priming (whole samples and the straddling part) on the first packet;
+  with one non-empty edit, the samples after the one reaching its end are
+  not packets; the last packet's decoded tail past the track duration
+  (mdhd, stts and edit-list totals) at a codec frame per packet;
+  fragmented AAC skips its edit's media time; iTunSMPB priming (AAC) and
+  remainder (every packet reaching into it); after a seek, the priming
+  still ahead of a track's landing packet. Requires the PearTube
+  oxideav-core fork's `Demuxer::packet_metadata`.
 
 ## [0.0.10](https://github.com/OxideAV/oxideav-mp4/compare/v0.0.9...v0.0.10) - 2026-08-15
 

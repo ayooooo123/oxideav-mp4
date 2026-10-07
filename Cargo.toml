@@ -26,3 +26,8 @@ ctr = "0.9"
 oxideav-basic = "0.0"
 oxideav-flac = "0.0"
 oxideav-mjpeg = "0.1"
+
+# `Demuxer::packet_metadata` (per-packet audio trims) is in the PearTube
+# oxideav-core fork, not yet on crates.io.
+[patch.crates-io]
+oxideav-core = { git = "https://github.com/ayooooo123/oxideav-core", rev = "96094a916d8b9f2695f70bb0d53e5956b8a79847" }
