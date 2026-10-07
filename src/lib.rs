@@ -4,6 +4,10 @@
 //! moov-at-end muxer with optional faststart (moov-at-front) rewrite.
 //! Three brand presets are registered: `mp4`, `mov`, and `ismv` — all
 //! share one implementation and only differ in their `ftyp` preset.
+//!
+//! The upstream code is MIT. The audio trims (`demux::audio_trim`) are
+//! ported from FFmpeg and are LGPL-2.1-or-later (see `LICENSE-LGPL` and the
+//! file's notice); the crate as a whole is `MIT AND LGPL-2.1-or-later`.
 
 // Internal plumbing: low-level BMFF box-header reader + FourCC constant
 // table. Not part of the stable API (the README documents no `boxes::`

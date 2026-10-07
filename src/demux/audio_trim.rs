@@ -1,3 +1,17 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// Port of FFmpeg 2da55bf libavformat/mov.c (mov_fix_index's edit-list
+// priming and end, mov_build_index's fragmented edit, the iTunSMPB counts,
+// mov_get_skip_samples) and libavformat/demux.c (the discard window of
+// read_frame_internal).
+// Copyright (c) 2001 Fabrice Bellard, 2009 Baptiste Coudurier (mov.c);
+// 2000-2002 Fabrice Bellard (demux.c)
+//
+// This file is free software; you can redistribute it and/or modify it under
+// the terms of the GNU Lesser General Public License as published by the Free
+// Software Foundation; either version 2.1, or (at your option) any later version.
+// It is distributed WITHOUT ANY WARRANTY; without even the implied warranty
+// of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See LICENSE-LGPL.
+
 //! Encoder delay and end padding of audio tracks, exposed per packet as
 //! `PacketMetadata::audio_trim` in the track's media timescale, with the
 //! values FFmpeg's mov demuxer (2da55bf `libavformat/mov.c`, with
@@ -28,11 +42,16 @@
 //! of it (`mov_get_skip_samples`).
 //!
 //! Counts are in the media timescale, which the trim declares as its rate,
-//! so a consumer rescales them to the rate the decoder outputs; FFmpeg
-//! counts edit-list skips in timescale units and everything else in output
-//! samples, which agree when the timescale is the sample rate. Edit lists
-//! with more than one non-empty edit get only the start skip; an edit whose
-//! duration is zero is open-ended rather than empty.
+//! so a consumer rescales them to the rate the decoder outputs and the
+//! skip ends exactly where the edit's media time does. FFmpeg 2da55bf
+//! instead applies an edit-list skip's timescale ticks as output samples
+//! (`mov_fix_index` to `decode.c`), and counts everything else in output
+//! samples: with a timescale below the output rate (HE-AAC at its core
+//! rate) it leaves priming in the output, stamped before zero. That one
+//! difference is deliberate; the two agree whenever the timescale is the
+//! sample rate. Edit lists with more than one non-empty edit get only the
+//! start skip; an edit whose duration is zero is open-ended rather than
+//! empty.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -204,7 +223,7 @@ pub(super) fn sample_table(
 
     // st->duration: mdhd, then the stts total, then the edit list's length.
     let mut duration = t.duration.map(|d| if d == u64::from(u32::MAX) || d == u64::MAX { 0 } else { d });
-    let stts_total = t.stts.iter().fold(0i64, |sum, &(n, d)| sum.saturating_add(i64::from(n) * i64::from(d)));
+    let stts_total = t.stts.iter().fold(0i64, |sum, &(n, d)| sum.saturating_add(i64::from(n).saturating_mul(i64::from(d))));
     if let Some(d) = duration.as_mut() {
         if stts_total > 0 {
             *d = (*d).min(stts_total as u64);

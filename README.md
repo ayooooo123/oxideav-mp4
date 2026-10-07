@@ -1449,9 +1449,9 @@ parentheses):
 - `mp3` → `mp4a` with `esds` `objectTypeIndication = 0x6B` (MPEG-1 audio;
   no DecoderSpecificInfo — the demuxer's OTI refinement resolves it back
   to `mp3`)
-- `opus` → `Opus` with `dOps` (extradata is the demuxer's surfaced form —
-  the dOps body behind an `OpusHead` magic; the magic is stripped on
-  write and re-prepended on read, byte-exact both ways)
+- `opus` → `Opus` with `dOps` (extradata is the demuxer's surfaced form,
+  the Ogg `OpusHead` a decoder reads; the write side turns it back into
+  the big-endian, version-0 dOps body, the read side the other way)
 - `alac` → `alac` with `alac` magic-cookie config child (extradata is the
   cookie; the FullBox version/flags word is added on write / stripped on
   read)
@@ -1954,4 +1954,7 @@ Pinned regressions worth calling out:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE) — except the audio trims
+(`src/demux/audio_trim.rs`), ported from FFmpeg and LGPL-2.1-or-later (see
+[LICENSE-LGPL](LICENSE-LGPL)); the crate as a whole is
+`MIT AND LGPL-2.1-or-later`.

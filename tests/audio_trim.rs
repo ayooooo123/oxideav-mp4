@@ -44,14 +44,19 @@ fn hdlr(kind: &[u8; 4]) -> Vec<u8> {
     full_box(b"hdlr", &[&[0u8; 4][..], kind, &[0u8; 13]].concat())
 }
 
-/// An AAC (`mp4a`) sample entry without an `esds`.
-fn stsd_mp4a(rate: u32) -> Vec<u8> {
+/// An audio sample entry's fixed part: 2 channels, 16 bits, `rate`.
+fn audio_entry(rate: u32) -> Vec<u8> {
     let mut entry = vec![0u8; 28];
     entry[6..8].copy_from_slice(&1u16.to_be_bytes());
     entry[16..18].copy_from_slice(&2u16.to_be_bytes());
     entry[18..20].copy_from_slice(&16u16.to_be_bytes());
     entry[24..28].copy_from_slice(&(rate << 16).to_be_bytes());
-    full_box(b"stsd", &[&1u32.to_be_bytes()[..], &boxed(b"mp4a", &entry)].concat())
+    entry
+}
+
+/// An AAC (`mp4a`) sample entry without an `esds`.
+fn stsd_mp4a(rate: u32) -> Vec<u8> {
+    full_box(b"stsd", &[&1u32.to_be_bytes()[..], &boxed(b"mp4a", &audio_entry(rate))].concat())
 }
 
 fn stts(runs: &[(u32, u32)]) -> Vec<u8> {
@@ -88,12 +93,17 @@ fn itunsmpb(value: &str) -> Vec<u8> {
 /// One AAC track: `runs` of (samples, duration) in `timescale`, the mdhd
 /// `duration`, an optional `edts`, and moov-level boxes after the track.
 fn aac_file(timescale: u32, runs: &[(u32, u32)], duration: u32, edts: &[u8], after: &[u8]) -> Vec<u8> {
+    audio_file(&stsd_mp4a(timescale), timescale, runs, duration, edts, after)
+}
+
+/// [`aac_file`] with the sample description `stsd`.
+fn audio_file(stsd: &[u8], timescale: u32, runs: &[(u32, u32)], duration: u32, edts: &[u8], after: &[u8]) -> Vec<u8> {
     let count: u32 = runs.iter().map(|r| r.0).sum();
     let moov = |offset: u32| {
         let stsc = full_box(b"stsc", &[1u32, 1, count, 1].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>());
         let stsz = full_box(b"stsz", &[4u32, count].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>());
         let stco = full_box(b"stco", &[1u32, offset].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>());
-        let stbl = boxed(b"stbl", &[stsd_mp4a(timescale), stts(runs), stsc, stsz, stco].concat());
+        let stbl = boxed(b"stbl", &[stsd.to_vec(), stts(runs), stsc, stsz, stco].concat());
         let minf = boxed(b"minf", &[boxed(b"smhd", &[0; 8]), stbl].concat());
         let mdia = boxed(b"mdia", &[mdhd(timescale, duration), hdlr(b"soun"), minf].concat());
         let trak = boxed(b"trak", &[tkhd(), edts.to_vec(), mdia].concat());
@@ -149,7 +159,10 @@ fn a_seek_skips_the_priming_still_ahead_of_the_landing_packet() {
     let got = trims(&mut *d);
     assert_eq!(got[0], (-64, trim(64, 0, 44100)));
     assert_eq!(got.last().unwrap().1, trim(0, 56, 44100));
-    // Past the priming nothing is skipped; the metadata resets on seek.
+    // Seek while the accessor still holds a trimmed packet, not after EOF.
+    d.seek_to(0, 0).unwrap();
+    d.next_packet().unwrap();
+    assert_eq!(d.packet_metadata().audio_trim, trim(64, 0, 44100));
     d.seek_to(0, 1000).unwrap();
     assert_eq!(d.packet_metadata().audio_trim, None);
     assert_eq!(trims(&mut *d)[0], (960, None));
@@ -228,4 +241,45 @@ fn hostile_edit_lists_stay_bounded() {
             assert!(skip >= 5 * 1024, "skip {skip} leaves priming");
         }
     }
+}
+
+#[test]
+fn hostile_stts_product_is_bounded_without_changing_the_packet_count() {
+    let mut bytes = aac_file(48000, &[(1, 512)], 512, &[], &[]);
+    let at = bytes.windows(4).position(|b| b == b"stts").unwrap();
+    bytes[at + 12..at + 16].copy_from_slice(&u32::MAX.to_be_bytes());
+    bytes[at + 16..at + 20].copy_from_slice(&u32::MAX.to_be_bytes());
+    let got = trims(&mut *open(bytes));
+    assert_eq!(got, [(0, trim(0, u32::MAX - 512, 48000))]);
+}
+
+#[test]
+fn trims_stay_in_the_media_timescale_when_the_output_rate_differs() {
+    // HE-AAC whose timescale is its 24 kHz core rate while its sample entry
+    // declares the 48 kHz output: the trims declare the timescale, so a
+    // consumer turns the 100-tick edit skip into the 200 output samples it
+    // covers and the output starts at pts 0. FFmpeg 2da55bf would skip 100
+    // output samples here (see `src/demux/audio_trim.rs`).
+    let mut bytes = aac_file(24000, &[(2, 512)], 1024, &elst(&[(900, 100)]), &[]);
+    let at = bytes.windows(4).position(|b| b == b"mp4a").unwrap();
+    bytes[at + 28..at + 32].copy_from_slice(&(48000u32 << 16).to_be_bytes());
+    let mut d = open(bytes);
+    assert_eq!(d.streams()[0].params.sample_rate, Some(48000));
+    let got = trims(&mut *d);
+    assert_eq!(got, [(-100, trim(100, 0, 24000)), (412, trim(0, 24, 24000))]);
+}
+
+#[test]
+fn opus_dops_reads_as_the_little_endian_opushead_decoders_take() {
+    // dOps: version 0, 2 channels, pre-skip 312, 48 kHz input, gain -2,
+    // mapping family 0, big-endian.
+    let dops = [0u8, 2, 0x01, 0x38, 0, 0, 0xBB, 0x80, 0xFF, 0xFE, 0];
+    let entry = boxed(b"Opus", &[audio_entry(48000), boxed(b"dOps", &dops)].concat());
+    let stsd = full_box(b"stsd", &[&1u32.to_be_bytes()[..], &entry].concat());
+    let mut d = open(audio_file(&stsd, 48000, &[(2, 960)], 1608, &elst(&[(1608, 312)]), &[]));
+    let params = &d.streams()[0].params;
+    assert_eq!(params.codec_id.as_str(), "opus");
+    assert_eq!(params.extradata, [&b"OpusHead"[..], &[1, 2, 0x38, 0x01, 0x80, 0xBB, 0, 0, 0xFE, 0xFF, 0]].concat());
+    // The edit list's priming is the first packet's skip.
+    assert_eq!(trims(&mut *d)[0], (-312, trim(312, 0, 48000)));
 }

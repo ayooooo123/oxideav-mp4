@@ -1640,13 +1640,13 @@ fn video_codecs_roundtrip_extradata() {
 
 #[test]
 fn audio_codecs_roundtrip_extradata() {
-    // Opus: extradata carries the OpusHead magic on both sides of the trip
-    // (the demuxer re-prepends what the muxer strips).
+    // Opus: the Ogg OpusHead (little-endian) on both sides of the trip; the
+    // file holds it as a big-endian dOps.
     let mut opus_head = b"OpusHead".to_vec();
-    opus_head.extend_from_slice(&[1, 2, 0x01, 0x38, 0, 0, 0xBB, 0x80, 0, 0, 0]);
+    opus_head.extend_from_slice(&[1, 2, 0x38, 0x01, 0x80, 0xBB, 0, 0, 0, 0, 0]);
     let (params, _) = remux(&audio_stream("opus", &opus_head));
     assert_eq!(params.codec_id, CodecId::new("opus"));
-    assert_eq!(params.extradata, opus_head, "OpusHead magic re-prepended");
+    assert_eq!(params.extradata, opus_head, "OpusHead survives the dOps round trip");
 
     // ALAC: the magic cookie survives (demux strips the FullBox word the
     // muxer adds).

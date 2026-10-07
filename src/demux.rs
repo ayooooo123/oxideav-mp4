@@ -7897,12 +7897,21 @@ fn parse_audio_children(buf: &[u8], t: &mut Track, hints: &mut PcmHints) -> Resu
             b"dfLa" if body.len() > 4 => {
                 t.extradata = body[4..].to_vec();
             }
-            // Opus-in-MP4 dOps: a subset of OpusHead without the 8-byte magic.
-            // We rebuild OpusHead so our downstream code can treat it uniformly.
-            b"dOps" if body.len() >= 11 => {
+            // Opus-in-MP4 dOps ("Encapsulation of Opus in ISO Base Media
+            // File Format" §4.3.2): OpusHead (RFC 7845 §5.1) without its
+            // magic, version 0, and its numbers big-endian. Rebuild the
+            // OpusHead a decoder reads: magic, version 1, and the pre-skip,
+            // input rate and output gain little-endian; the channel mapping
+            // that follows is the same bytes. FFmpeg's `mov_read_dops` does
+            // the same and refuses other dOps versions.
+            b"dOps" if body.len() >= 11 && body[0] == 0 => {
                 let mut oh = Vec::with_capacity(body.len() + 8);
                 oh.extend_from_slice(b"OpusHead");
-                oh.extend_from_slice(&body);
+                oh.extend_from_slice(&[1, body[1]]);
+                oh.extend_from_slice(&u16::from_be_bytes([body[2], body[3]]).to_le_bytes());
+                oh.extend_from_slice(&u32::from_be_bytes([body[4], body[5], body[6], body[7]]).to_le_bytes());
+                oh.extend_from_slice(&u16::from_be_bytes([body[8], body[9]]).to_le_bytes());
+                oh.extend_from_slice(&body[10..]);
                 t.extradata = oh;
             }
             // ES Descriptor box for MPEG-4 audio (mp4a): strip the nested

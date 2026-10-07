@@ -409,11 +409,12 @@ fn h263_entry(params: &CodecParameters) -> Result<SampleEntry> {
 }
 
 /// Opus sample entry (`Opus` + `dOps`). This crate's demuxer surfaces the
-/// dOps body with an 8-byte `OpusHead` magic prepended so downstream code
-/// treats Ogg- and MP4-sourced Opus uniformly; the write side strips that
-/// magic back off when present and emits the remaining bytes verbatim as
-/// the `dOps` body — the byte-exact inverse. Extradata without the magic is
-/// taken to already be the dOps body.
+/// dOps config as the Ogg `OpusHead` a decoder reads (RFC 7845 §5.1), so
+/// the write side turns an OpusHead back into the dOps body ("Encapsulation
+/// of Opus in ISO Base Media File Format" §4.3.2): version 0 instead of the
+/// magic and version, pre-skip, input rate and output gain big-endian, the
+/// channel mapping as is (FFmpeg's `mov_write_dops_tag`). Extradata without
+/// the magic is taken to already be the dOps body.
 fn opus_entry(params: &CodecParameters) -> Result<SampleEntry> {
     if params.media_type != MediaType::Audio {
         return Err(Error::invalid("mp4 muxer: opus must be audio"));
@@ -429,17 +430,24 @@ fn opus_entry(params: &CodecParameters) -> Result<SampleEntry> {
             "mp4 muxer: opus stream missing extradata (OpusHead / dOps config)",
         ));
     }
+    let too_short = || Error::invalid("mp4 muxer: opus extradata too short for a dOps config");
     let dops_body = match params.extradata.strip_prefix(b"OpusHead") {
-        Some(rest) => rest,
-        None => &params.extradata[..],
+        Some(head) => {
+            if head.len() < 11 {
+                return Err(too_short());
+            }
+            let mut dops = vec![0, head[1]];
+            dops.extend_from_slice(&u16::from_le_bytes([head[2], head[3]]).to_be_bytes());
+            dops.extend_from_slice(&u32::from_le_bytes([head[4], head[5], head[6], head[7]]).to_be_bytes());
+            dops.extend_from_slice(&u16::from_le_bytes([head[8], head[9]]).to_be_bytes());
+            dops.extend_from_slice(&head[10..]);
+            dops
+        }
+        None if params.extradata.len() >= 11 => params.extradata.clone(),
+        None => return Err(too_short()),
     };
-    if dops_body.len() < 11 {
-        return Err(Error::invalid(
-            "mp4 muxer: opus extradata too short for a dOps config",
-        ));
-    }
     let mut body = audio_preamble(channels, 16, sample_rate).to_vec();
-    body.extend_from_slice(&write_simple_box(b"dOps", dops_body));
+    body.extend_from_slice(&write_simple_box(b"dOps", &dops_body));
     Ok(SampleEntry {
         fourcc: *b"Opus",
         body,
@@ -818,16 +826,18 @@ mod tests {
     }
 
     #[test]
-    fn opus_entry_strips_opushead_magic() {
-        // 11-byte dOps-shaped payload behind the OpusHead magic.
-        let dops = [1u8, 2, 0x01, 0x38, 0, 0, 0xBB, 0x80, 0, 0, 0];
+    fn opus_entry_writes_a_big_endian_dops_from_opushead() {
+        // OpusHead after its magic: version 1, 2 channels, pre-skip 312,
+        // 48 kHz input, gain 0, mapping family 0, all little-endian.
+        let head = [1u8, 2, 0x38, 0x01, 0x80, 0xBB, 0, 0, 0, 0, 0];
+        let dops = [0u8, 2, 0x01, 0x38, 0, 0, 0xBB, 0x80, 0, 0, 0];
         let mut extradata = b"OpusHead".to_vec();
-        extradata.extend_from_slice(&dops);
+        extradata.extend_from_slice(&head);
         let e = sample_entry_for(&audio_params("opus", &extradata)).unwrap();
         assert_eq!(&e.fourcc, b"Opus");
         assert_eq!(e.body.len(), 28 + 8 + dops.len());
         assert_eq!(&e.body[32..36], b"dOps");
-        assert_eq!(&e.body[36..], &dops, "dOps body must lose the magic");
+        assert_eq!(&e.body[36..], &dops, "dOps is version 0 and big-endian");
 
         // Extradata already without the magic is taken verbatim.
         let e2 = sample_entry_for(&audio_params("opus", &dops)).unwrap();
