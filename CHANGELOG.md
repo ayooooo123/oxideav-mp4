@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- VobSub in MP4 plays: a `subp` handler is a subtitle track, and an
+  `mp4s` entry whose esds names object type 0xE0 is `dvd_subtitle`, its
+  YUV colour table turned into the `palette:` text FFmpeg's demuxer gives
+  its DVD decoder (`src/demux/dvdclut.rs`, LGPL port).
 - QuickTime `text` sample entries are `mov_text`, as FFmpeg's
   `ff_codec_movsubtitle_tags` maps them; `text` was its own codec id,
   which belongs to FFmpeg's raw text subtitles.

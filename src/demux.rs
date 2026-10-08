@@ -9,6 +9,7 @@
 //! `next_packet` then serves them in order by seeking into the mdat.
 
 mod audio_trim;
+mod dvdclut;
 mod video_config;
 
 use std::collections::HashSet;
@@ -6644,10 +6645,13 @@ fn parse_hdlr(body: &[u8], t: &mut Track) -> Result<()> {
         h if *h == HANDLER_SOUN => MediaType::Audio,
         h if *h == HANDLER_VIDE => MediaType::Video,
         // `subt` (BMFF §12.6.1), `sbtl` (QuickTime), `text` (BMFF
-        // §12.5.1 timed text — `tx3g` lives here). All three are
-        // surfaced as MediaType::Subtitle so callers can route them
-        // through their subtitle pipeline.
-        h if *h == HANDLER_SUBT || *h == HANDLER_SBTL || *h == HANDLER_TEXT => MediaType::Subtitle,
+        // §12.5.1 timed text — `tx3g` lives here) and `subp` (DVD
+        // subpictures in `mp4s`, as FFmpeg's `mov_read_hdlr` reads it).
+        // All are surfaced as MediaType::Subtitle so callers can route
+        // them through their subtitle pipeline.
+        h if *h == HANDLER_SUBT || *h == HANDLER_SBTL || *h == HANDLER_TEXT || *h == HANDLER_SUBP => {
+            MediaType::Subtitle
+        }
         // `meta` — timed metadata (BMFF §8.11). Stays as Data; no
         // subtitle dispatch.
         h if *h == HANDLER_META => MediaType::Data,
@@ -7756,6 +7760,27 @@ fn parse_subtitle_sample_entry(entry: &[u8], t: &mut Track) -> Result<()> {
             // the post-preamble bytes are still preserved as extradata
             // for any nonstandard carriage.
             t.extradata = entry[8..].to_vec();
+        }
+        // MPEG-4 Systems entry (ISO/IEC 14496-14 MpegSampleEntry): child
+        // boxes after the preamble; the esds names the stream (object
+        // type 0xE0: DVD subpictures) and carries its setup (the colour
+        // table).
+        b"mp4s" => {
+            let mut cur = std::io::Cursor::new(&entry[8..]);
+            let end = (entry.len() - 8) as u64;
+            while cur.position() + 8 <= end {
+                let Some(hdr) = read_box_header(&mut cur)? else { break };
+                let psz = hdr.payload_size().unwrap_or(0) as usize;
+                let body = read_bytes_vec(&mut cur, psz)?;
+                if &hdr.fourcc == b"esds" && body.len() >= 4 {
+                    if let Some(parsed) = parse_esds(&body[4..]) {
+                        if !parsed.dsi.is_empty() {
+                            t.extradata = parsed.dsi;
+                        }
+                        t.esds_oti = parsed.oti;
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -11969,6 +11994,11 @@ fn build_stream_info(index: u32, t: &Track, codecs: &dyn CodecResolver) -> Strea
     params.width = t.width;
     params.height = t.height;
     params.extradata = t.extradata.clone();
+    // FFmpeg's mov_read_header: a DVD subtitle's colour table becomes the
+    // `palette:` text its decoder reads.
+    if params.codec_id.as_str() == "dvd_subtitle" && params.extradata.len() == dvdclut::CLUT_SIZE {
+        params.extradata = dvdclut::palette_extradata(&params.extradata);
+    }
     // HE-AAC: some writers put the AAC *core* rate in the `mp4a` sample
     // entry. The decoder emits the SBR output rate the ASC declares, so
     // report that (ISO/IEC 14496-3 §1.6.5 / §4.6.18).

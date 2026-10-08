@@ -637,6 +637,9 @@ pub const HANDLER_TEXT: [u8; 4] = fourcc("text");
 /// `sbtl` — QuickTime subtitle handler (legacy variant; common in
 /// `.mov` files muxed by Apple tools alongside the spec `subt`).
 pub const HANDLER_SBTL: [u8; 4] = fourcc("sbtl");
+/// `subp` — MPEG-4 subpicture handler (DVD subtitles in an `mp4s` entry);
+/// FFmpeg's `mov_read_hdlr` makes it a subtitle stream.
+pub const HANDLER_SUBP: [u8; 4] = fourcc("subp");
 /// `meta` — Timed metadata handler (ISO/IEC 14496-12 §8.11).
 pub const HANDLER_META: [u8; 4] = fourcc("meta");
 

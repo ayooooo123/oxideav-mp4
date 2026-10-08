@@ -159,6 +159,9 @@ pub fn from_sample_entry_with_oti(fourcc: &[u8; 4], oti: u8) -> CodecId {
             };
             CodecId::new(id)
         }
+        // MPEG-4 Systems private streams: object type 0xE0 is DVD
+        // subpictures (FFmpeg's `ff_mp4_obj_type`).
+        b"mp4s" if oti == 0xE0 => CodecId::new("dvd_subtitle"),
         _ => from_sample_entry(fourcc),
     }
 }

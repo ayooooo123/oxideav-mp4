@@ -1955,6 +1955,7 @@ Pinned regressions worth calling out:
 ## License
 
 MIT — see [LICENSE](LICENSE) — except the audio trims
-(`src/demux/audio_trim.rs`), ported from FFmpeg and LGPL-2.1-or-later (see
+(`src/demux/audio_trim.rs`) and the DVD subtitle colour table
+(`src/demux/dvdclut.rs`), ported from FFmpeg and LGPL-2.1-or-later (see
 [LICENSE-LGPL](LICENSE-LGPL)); the crate as a whole is
 `MIT AND LGPL-2.1-or-later`.
