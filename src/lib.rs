@@ -91,7 +91,9 @@ oxideav_core::register!("mp4", register);
 
 /// `....ftyp` at offset 0 — ISO base media file format. Some files lead
 /// with a `wide` or `free` box before `ftyp`, so accept that with a
-/// slightly lower confidence.
+/// slightly lower confidence. A file without `ftyp` (pre-`ftyp`
+/// QuickTime writes `moov` first) is not claimed: the demuxer refuses
+/// it, and a claim would take it from a QuickTime demuxer.
 fn probe(p: &oxideav_core::ProbeData) -> u8 {
     if p.buf.len() < 8 {
         return 0;
@@ -104,10 +106,6 @@ fn probe(p: &oxideav_core::ProbeData) -> u8 {
         && &p.buf[12..16] == b"ftyp"
     {
         return 90;
-    }
-    // QuickTime sometimes writes `moov` first, no `ftyp`.
-    if &p.buf[4..8] == b"moov" {
-        return 50;
     }
     0
 }
@@ -145,5 +143,21 @@ mod tests {
             .err()
             .expect("sentinel demuxer error");
         assert!(err.to_string().contains("sentinel"), "{err}");
+    }
+
+    #[test]
+    fn probe_leaves_movies_without_ftyp_to_quicktime() {
+        // Pre-`ftyp` QuickTime: the first atom is `moov`. The demuxer
+        // refuses any file without `ftyp`, so a claim here would only
+        // take the file from a QuickTime demuxer that can open it.
+        let mut movie = 16u32.to_be_bytes().to_vec();
+        movie.extend_from_slice(b"moov");
+        movie.extend_from_slice(&8u32.to_be_bytes());
+        movie.extend_from_slice(b"mvhd");
+        let codecs = oxideav_core::CodecRegistry::new();
+        assert!(demux::open(Box::new(std::io::Cursor::new(movie.clone())), &codecs).is_err());
+        for ext in [Some("mov"), Some("mp4"), None] {
+            assert_eq!(probe(&oxideav_core::ProbeData { buf: &movie, ext }), 0, "{ext:?}");
+        }
     }
 }

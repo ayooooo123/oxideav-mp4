@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `.mov` mapped to the `mov` container, which had a muxer but no
   demuxer in an MP4-only registry; the MP4 demuxer is now registered as
   the `mov` demuxer unless another QuickTime demuxer already holds it.
+- The probe no longer claims a file without `ftyp`. Pre-`ftyp` QuickTime
+  movies start with `moov`; the probe scored them 50, above the
+  QuickTime demuxer's 40, and then the MP4 demuxer refused them
+  ("missing ftyp box"), so they could not be opened in a registry with
+  both demuxers.
 
 ### Added
 
