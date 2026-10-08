@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   QuickTime demuxer's 40, and then the MP4 demuxer refused them
   ("missing ftyp box"), so they could not be opened in a registry with
   both demuxers.
+- AMR in 3GPP files plays: an AMR-NB or AMR-WB track is mono at 8000 or
+  16000 Hz, as FFmpeg's `mov_finalize_stsd_codec` forces it. 3GPP fixes
+  the sample entry's channel count at 2, which made the AMR decoders
+  expect two frames a packet and fail.
 
 ### Added
 

@@ -12011,6 +12011,14 @@ fn build_stream_info(index: u32, t: &Track, codecs: &dyn CodecResolver) -> Strea
             }
         }
     }
+    // AMR: 3GPP fixes the sample entry's channel count at 2 and need not
+    // carry the rate; FFmpeg's mov_finalize_stsd_codec forces mono and the
+    // AMR rate.
+    match params.codec_id.as_str() {
+        "amr_nb" => (params.channels, params.sample_rate) = (Some(1), Some(8000)),
+        "amr_wb" => (params.channels, params.sample_rate) = (Some(1), Some(16000)),
+        _ => {}
+    }
     // The decoded-picture layout, from the avcC / hvcC record, so
     // consumers can plan pixel-format conversions before decoding.
     if params.media_type == MediaType::Video && params.pixel_format.is_none() {
