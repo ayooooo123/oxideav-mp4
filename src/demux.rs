@@ -11948,7 +11948,10 @@ fn build_stream_info(index: u32, t: &Track, codecs: &dyn CodecResolver) -> Strea
     // Try the shared CodecResolver registry first — this lets codec crates
     // own their sample-entry FourCCs / OTI mapping. For `mp4a` / `mp4v`
     // entries we prefer the OTI-aware tag (more specific) over the bare
-    // FourCC, then fall back to the static `from_sample_entry*` tables.
+    // FourCC. If no registered codec claims that OTI, resolve through the
+    // static OTI table (`from_sample_entry_with_oti`) before falling back
+    // to the bare FourCC registry lookup, so e.g. MP3-in-mp4a (OTI 0x6B/0x69)
+    // is not misresolved as AAC by an AAC crate claiming `mp4a`.
     let codec_id = {
         // Fill a ProbeContext with the hints we've already parsed so
         // codec probes can disambiguate (e.g. PCM flavours by bit depth).
@@ -11957,6 +11960,9 @@ fn build_stream_info(index: u32, t: &Track, codecs: &dyn CodecResolver) -> Strea
             let tag = CodecTag::mp4_object_type(oti);
             let ctx = build_ctx(&tag, t);
             resolved = codecs.resolve_tag(&ctx);
+            if resolved.is_none() {
+                resolved = Some(from_sample_entry_with_oti(&t.codec_id_fourcc, oti));
+            }
         }
         if resolved.is_none() {
             let tag = CodecTag::fourcc(&t.codec_id_fourcc);
@@ -15359,6 +15365,45 @@ mod tests {
         let info = super::build_stream_info(0, &t, &oxideav_core::NullCodecResolver);
         assert_eq!(info.params.options.get("stsd_count"), None);
         assert_eq!(info.params.options.get("stsd_1"), None);
+    }
+
+    #[test]
+    fn build_stream_info_mp4a_mp3_oti_precedes_fourcc_resolver() {
+        use oxideav_core::{CodecId, CodecResolver, CodecTag, ProbeContext};
+        struct AacResolver;
+        impl CodecResolver for AacResolver {
+            fn resolve_tag(&self, ctx: &ProbeContext) -> Option<CodecId> {
+                match ctx.tag {
+                    CodecTag::Fourcc(fourcc) if fourcc == b"MP4A" => Some(CodecId::new("aac")),
+                    CodecTag::Mp4ObjectType(0x40) => Some(CodecId::new("aac")),
+                    _ => None,
+                }
+            }
+        }
+        let resolver = AacResolver;
+        // Track with mp4a FourCC and MPEG-1 audio OTI (0x6B) -> mp3
+        let mut t_mp3_1 = fresh_track();
+        t_mp3_1.media_type = oxideav_core::MediaType::Audio;
+        t_mp3_1.codec_id_fourcc = *b"mp4a";
+        t_mp3_1.esds_oti = Some(0x6B);
+        let info = super::build_stream_info(0, &t_mp3_1, &resolver);
+        assert_eq!(info.params.codec_id.as_str(), "mp3");
+
+        // Track with mp4a FourCC and MPEG-2 audio OTI (0x69) -> mp3
+        let mut t_mp3_2 = fresh_track();
+        t_mp3_2.media_type = oxideav_core::MediaType::Audio;
+        t_mp3_2.codec_id_fourcc = *b"mp4a";
+        t_mp3_2.esds_oti = Some(0x69);
+        let info = super::build_stream_info(0, &t_mp3_2, &resolver);
+        assert_eq!(info.params.codec_id.as_str(), "mp3");
+
+        // Track with mp4a FourCC and AAC OTI (0x40) -> aac
+        let mut t_aac = fresh_track();
+        t_aac.media_type = oxideav_core::MediaType::Audio;
+        t_aac.codec_id_fourcc = *b"mp4a";
+        t_aac.esds_oti = Some(0x40);
+        let info = super::build_stream_info(0, &t_aac, &resolver);
+        assert_eq!(info.params.codec_id.as_str(), "aac");
     }
 
     #[test]

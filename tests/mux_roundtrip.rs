@@ -4,7 +4,10 @@
 
 use std::io::Cursor;
 
-use oxideav_core::{CodecId, CodecParameters, Packet, SampleFormat, StreamInfo, TimeBase};
+use oxideav_core::{
+    CodecId, CodecParameters, CodecResolver, CodecTag, Packet, ProbeContext, SampleFormat,
+    StreamInfo, TimeBase,
+};
 use oxideav_core::{ReadSeek, WriteSeek};
 
 fn pcm_stream_info() -> StreamInfo {
@@ -1202,6 +1205,69 @@ fn mp4a_aac_oti_resolves_to_aac() {
     let rs: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
     let dmx = oxideav_mp4::demux::open(rs, &oxideav_core::NullCodecResolver).unwrap();
     assert_eq!(dmx.streams()[0].params.codec_id.as_str(), "aac");
+}
+
+/// A resolver simulating a real player environment where the AAC codec
+/// claims the `mp4a` FourCC (and OTI 0x40), but nothing claims the MP3
+/// OTIs (0x6B, 0x69).
+struct AacClaimsMp4aFourccResolver;
+
+impl CodecResolver for AacClaimsMp4aFourccResolver {
+    fn resolve_tag(&self, ctx: &ProbeContext) -> Option<CodecId> {
+        match ctx.tag {
+            CodecTag::Fourcc(fourcc) if fourcc == b"MP4A" => Some(CodecId::new("aac")),
+            CodecTag::Mp4ObjectType(0x40) => Some(CodecId::new("aac")),
+            _ => None,
+        }
+    }
+}
+
+#[test]
+fn mp4a_mp3_oti_resolves_to_mp3_with_aac_claiming_fourcc() {
+    let resolver = AacClaimsMp4aFourccResolver;
+    for (oti, expected_codec) in [(0x6B, "mp3"), (0x69, "mp3"), (0x40, "aac")] {
+        let bytes = build_mp4_with_mp4a_oti(oti);
+        let rs: Box<dyn ReadSeek> = Box::new(Cursor::new(bytes));
+        let dmx = oxideav_mp4::demux::open(rs, &resolver).unwrap();
+        assert_eq!(dmx.streams().len(), 1);
+        let params = &dmx.streams()[0].params;
+        assert_eq!(
+            params.codec_id.as_str(),
+            expected_codec,
+            "OTI {oti:#04x} should resolve to {expected_codec}"
+        );
+        assert_eq!(params.sample_rate, Some(44_100));
+        assert_eq!(params.channels, Some(1));
+        assert_eq!(params.sample_format, None);
+    }
+}
+
+#[test]
+fn mp3_mux_demux_roundtrip_with_aac_claiming_fourcc() {
+    let stream = audio_stream("mp3", &[]);
+    let (params, _) = {
+        let tmp = std::env::temp_dir().join("oxideav-mp4-mp3-aac-resolver-roundtrip.mp4");
+        {
+            let f = std::fs::File::create(&tmp).unwrap();
+            let ws: Box<dyn WriteSeek> = Box::new(f);
+            let mut mux = oxideav_mp4::muxer::open(ws, std::slice::from_ref(&stream)).unwrap();
+            mux.write_header().unwrap();
+            let mut pkt = Packet::new(0, stream.time_base, vec![0xFF, 0xFB, 0x90, 0x64]);
+            pkt.pts = Some(0);
+            pkt.duration = Some(1152);
+            pkt.flags.keyframe = true;
+            mux.write_packet(&pkt).unwrap();
+            mux.write_trailer().unwrap();
+        }
+        let rs: Box<dyn ReadSeek> = Box::new(std::fs::File::open(&tmp).unwrap());
+        let dmx = oxideav_mp4::demux::open(rs, &AacClaimsMp4aFourccResolver).unwrap();
+        assert_eq!(dmx.streams().len(), 1);
+        (dmx.streams()[0].params.clone(), ())
+    };
+    assert_eq!(params.codec_id, CodecId::new("mp3"));
+    assert_eq!(params.sample_rate, Some(48_000));
+    assert_eq!(params.channels, Some(2));
+    assert_eq!(params.sample_format, None);
 }
 
 // --- Subtitle / timed-text mux round-trip --------------------------------
