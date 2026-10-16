@@ -11960,7 +11960,7 @@ fn build_stream_info(index: u32, t: &Track, codecs: &dyn CodecResolver) -> Strea
             let tag = CodecTag::mp4_object_type(oti);
             let ctx = build_ctx(&tag, t);
             resolved = codecs.resolve_tag(&ctx);
-            if resolved.is_none() {
+            if resolved.is_none() && matches!(&t.codec_id_fourcc, b"mp4a" | b"mp4v" | b"mp4s") {
                 resolved = Some(from_sample_entry_with_oti(&t.codec_id_fourcc, oti));
             }
         }
@@ -15404,6 +15404,62 @@ mod tests {
         t_aac.esds_oti = Some(0x40);
         let info = super::build_stream_info(0, &t_aac, &resolver);
         assert_eq!(info.params.codec_id.as_str(), "aac");
+    }
+
+    #[test]
+    fn demux_open_non_mp4_fourcc_with_esds_resolves_via_registry_fourcc() {
+        use oxideav_core::{
+            CodecId, CodecParameters, CodecResolver, CodecTag, Packet, ProbeContext, ReadSeek,
+            StreamInfo, TimeBase, WriteSeek,
+        };
+
+        struct SamrResolver;
+        impl CodecResolver for SamrResolver {
+            fn resolve_tag(&self, ctx: &ProbeContext) -> Option<CodecId> {
+                match ctx.tag {
+                    CodecTag::Fourcc(fourcc) if fourcc == b"SAMR" => Some(CodecId::new("amr_nb")),
+                    _ => None,
+                }
+            }
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "oxideav-mp4-samr-esds-{}.mp4",
+            std::process::id()
+        ));
+        {
+            let f = std::fs::File::create(&tmp).unwrap();
+            let ws: Box<dyn WriteSeek> = Box::new(f);
+            let mut params = CodecParameters::audio(CodecId::new("aac"));
+            params.channels = Some(2);
+            params.sample_rate = Some(44_100);
+            params.extradata = vec![0x12, 0x10];
+            let stream = StreamInfo {
+                index: 0,
+                time_base: TimeBase::new(1, 44_100),
+                duration: None,
+                start_time: Some(0),
+                params,
+            };
+            let mut mux = crate::muxer::open(ws, &[stream.clone()]).unwrap();
+            mux.write_header().unwrap();
+            let pkt = Packet::new(0, stream.time_base, vec![0x21; 32]);
+            mux.write_packet(&pkt).unwrap();
+            mux.write_trailer().unwrap();
+        }
+
+        let mut bytes = std::fs::read(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+
+        let count = bytes.windows(4).filter(|w| *w == b"mp4a").count();
+        assert_eq!(count, 1, "expected exactly one mp4a fourcc in stsd");
+        let pos = bytes.windows(4).position(|w| w == b"mp4a").expect("mp4a in stsd");
+        bytes[pos..pos + 4].copy_from_slice(b"samr");
+
+        let rs: Box<dyn ReadSeek> = Box::new(std::io::Cursor::new(bytes));
+        let dmx = super::open(rs, &SamrResolver).unwrap();
+        assert_eq!(dmx.streams().len(), 1);
+        assert_eq!(dmx.streams()[0].params.codec_id.as_str(), "amr_nb");
     }
 
     #[test]

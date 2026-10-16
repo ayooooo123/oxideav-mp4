@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sample entries other than `mp4a`, `mp4v`, and `mp4s` carrying an `esds`
+  box resolve through the codec registry's FourCC lookup before falling back
+  to the static OTI table, so registered FourCC claimants (such as `samr`
+  or `sawb`) are not obscured by an unclaimed OTI.
 - VobSub in MP4 plays: a `subp` handler is a subtitle track, and an
   `mp4s` entry whose esds names object type 0xE0 is `dvd_subtitle`, its
   YUV colour table turned into the `palette:` text FFmpeg's demuxer gives
