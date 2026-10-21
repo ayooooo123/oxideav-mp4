@@ -12009,6 +12009,9 @@ fn build_stream_info(index: u32, t: &Track, codecs: &dyn CodecResolver) -> Strea
     // entry. The decoder emits the SBR output rate the ASC declares, so
     // report that (ISO/IEC 14496-3 §1.6.5 / §4.6.18).
     if params.codec_id.as_str() == "aac" {
+        if let Some(channels) = crate::aac::asc_channel_count(&params.extradata) {
+            params.channels = Some(channels);
+        }
         if let Some(r) = crate::aac::asc_rates(&params.extradata) {
             if let (Some(out), Some(entry)) = (r.sbr_rate, params.sample_rate) {
                 if entry == r.core_rate && out != entry {
