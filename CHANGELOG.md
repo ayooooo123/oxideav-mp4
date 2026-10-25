@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Video metadata derives AV1/VP9 pixel formats from codec configuration
+  or the first frame, and constant frame rates from sample durations.
+  AAC channels and ALAC channels/sample rate use their codec configs;
+  QuickTime video sample-description terminators are accepted.
+
 ### Fixed
 
 - Sample entries other than `mp4a`, `mp4v`, and `mp4s` carrying an `esds`
