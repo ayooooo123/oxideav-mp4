@@ -12001,14 +12001,12 @@ fn fill_params_from_samples(
                 }
             }
             let tb = stream.time_base.0;
-            if constant
-                && let Some(d) = delta
-                && d > 0
-                && tb.num > 0
-                && tb.den > 0
-                && let Some(n) = tb.num.checked_mul(d)
-            {
-                stream.params.frame_rate = Some(Rational::new(tb.den, n).reduced());
+            if constant && tb.num > 0 && tb.den > 0 {
+                if let Some(d) = delta.filter(|d| *d > 0) {
+                    if let Some(n) = tb.num.checked_mul(d) {
+                        stream.params.frame_rate = Some(Rational::new(tb.den, n).reduced());
+                    }
+                }
             }
         }
         if stream.params.codec_id.as_str() == "vp9"
