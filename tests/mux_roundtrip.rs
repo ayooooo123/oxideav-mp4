@@ -1744,3 +1744,123 @@ fn audio_codecs_roundtrip_extradata() {
         assert_eq!(params.sample_rate, Some(48_000));
     }
 }
+
+#[test]
+fn non_interleaved_mdat_interleaves_tracks_within_one_second_and_seeks_cleanly() {
+    // Stuff all 6 s of AV1 video into mdat before byte 0 of PCM audio — the exact split-mdat shape uBit breeds — and prove audio arrives within 1 s instead of starving at the tail.
+    let mut v = video_stream("av1", &[0x81, 0x0C, 0x0C, 0x00]);
+    v.index = 0;
+    v.time_base = TimeBase::new(1, 1000);
+    let mut a = pcm_stream_info();
+    a.index = 1;
+    a.time_base = TimeBase::new(1, 48_000);
+    let streams = [v, a];
+
+    let tmp = std::env::temp_dir().join("oxideav-mp4-non-interleaved.mp4");
+    {
+        let ws: Box<dyn WriteSeek> = Box::new(std::fs::File::create(&tmp).unwrap());
+        let mut mux = oxideav_mp4::muxer::open(ws, &streams).unwrap();
+        mux.write_header().unwrap();
+        for i in 0..150i64 {
+            let mut pkt = Packet::new(0, streams[0].time_base, vec![(i & 0xFF) as u8; 64]);
+            pkt.pts = Some(i * 40);
+            pkt.dts = Some(i * 40);
+            pkt.duration = Some(40);
+            pkt.flags.keyframe = i % 25 == 0;
+            mux.write_packet(&pkt).unwrap();
+        }
+        for i in 0..288i64 {
+            let mut pkt = Packet::new(1, streams[1].time_base, make_pcm_payload(1000));
+            pkt.pts = Some(i * 1000);
+            pkt.dts = Some(i * 1000);
+            pkt.duration = Some(1000);
+            pkt.flags.keyframe = true;
+            mux.write_packet(&pkt).unwrap();
+        }
+        mux.write_trailer().unwrap();
+    }
+
+    let raw = std::fs::read(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+    let mut dmx = oxideav_mp4::demux::open(
+        Box::new(Cursor::new(raw)),
+        &oxideav_core::NullCodecResolver,
+    )
+    .unwrap();
+    let mut first_audio_pkt_idx = None;
+    let mut max_v_us: i64 = 0;
+    let mut max_a_us: i64 = 0;
+    let mut switches = 0usize;
+    let mut prev_stream: Option<u32> = None;
+    let mut v_count = 0usize;
+    let mut a_count = 0usize;
+    let mut idx = 0usize;
+    loop {
+        match dmx.next_packet() {
+            Ok(p) => {
+                if prev_stream.is_some_and(|prev| prev != p.stream_index) {
+                    switches += 1;
+                }
+                prev_stream = Some(p.stream_index);
+                let dts = p.dts.unwrap();
+                let us = dts * 1_000_000 * (p.time_base.num() as i64) / (p.time_base.den() as i64);
+                if p.stream_index == 0 {
+                    assert_eq!(p.data[0], (v_count & 0xFF) as u8);
+                    v_count += 1;
+                    max_v_us = us;
+                } else {
+                    if first_audio_pkt_idx.is_none() {
+                        first_audio_pkt_idx = Some(idx);
+                    }
+                    a_count += 1;
+                    max_a_us = us;
+                }
+                if v_count > 0 && a_count > 0 {
+                    assert!(
+                        (max_v_us - max_a_us).abs() <= 1_100_000,
+                        "tracks drifted too far apart: v={max_v_us}us a={max_a_us}us"
+                    );
+                }
+                idx += 1;
+            }
+            Err(oxideav_core::Error::Eof) => break,
+            Err(e) => panic!("demux error: {e}"),
+        }
+    }
+    assert_eq!(v_count, 150);
+    assert_eq!(a_count, 288);
+    assert!(
+        first_audio_pkt_idx.unwrap() <= 35,
+        "audio starved behind video: first audio at packet {:?}",
+        first_audio_pkt_idx
+    );
+    assert!(
+        switches <= 16,
+        "expected ~1 s contiguous runs rather than per-frame thrashing, got {switches} switches"
+    );
+
+    // Seeking to 3.0 s on video lands on the 3.0 s keyframe and yields ~3 s audio right beside it instead of draining to 6 s first.
+    let v_tb = dmx.streams()[0].time_base;
+    let a_tb = dmx.streams()[1].time_base;
+    let seek_v_ticks = 3 * (v_tb.den() as i64) / (v_tb.num() as i64);
+    let landed = dmx.seek_to(0, seek_v_ticks).unwrap();
+    assert_eq!(landed, seek_v_ticks);
+    let first_after_seek = dmx.next_packet().unwrap();
+    assert_eq!(first_after_seek.stream_index, 0);
+    assert_eq!(first_after_seek.pts, Some(seek_v_ticks));
+    let mut post_seek_audio_us = None;
+    for _ in 0..40 {
+        let p = dmx.next_packet().unwrap();
+        if p.stream_index == 1 {
+            post_seek_audio_us = p
+                .pts
+                .map(|pts| pts * 1_000_000 * (a_tb.num() as i64) / (a_tb.den() as i64));
+            break;
+        }
+    }
+    let a_us = post_seek_audio_us.expect("audio must follow within ~1 s after seek");
+    assert!(
+        (2_000_000..=4_100_000).contains(&a_us),
+        "post-seek audio {a_us}us should sit near 3 s, not 0"
+    );
+}

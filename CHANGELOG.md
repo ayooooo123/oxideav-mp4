@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Non-interleaved `mdat` files no longer starve trailing tracks or blow MSE buffers waiting for audio: `open()` walks per-track decode queues in byte-offset order within a 1 s decode window (`mov_find_next_sample`) and drains lagging tracks in ~1 s runs, keeping both linear playback and `seek_to` tight without per-frame seek thrashing.
 - Sample entries other than `mp4a`, `mp4v`, and `mp4s` carrying an `esds`
   box resolve through the codec registry's FourCC lookup before falling back
   to the static OTI table, so registered FourCC claimants (such as `samr`

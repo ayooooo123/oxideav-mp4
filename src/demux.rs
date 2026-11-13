@@ -3,8 +3,8 @@
 //! Strategy on open():
 //! 1. Validate ftyp.
 //! 2. Walk `moov/trak/*` to collect per-track metadata and sample tables.
-//! 3. Expand the sample tables into a flat, file-offset-sorted list of
-//!    samples `(track_idx, offset, size, pts, duration)`.
+//! 3. Expand the sample tables into a flat sample schedule: file-offset order
+//!    within a 1 s decode window, catching up starved tracks on non-interleaved `mdat`s.
 //!
 //! `next_packet` then serves them in order by seeking into the mdat.
 
@@ -377,7 +377,7 @@ pub fn open_typed(mut input: Box<dyn ReadSeek>, codecs: &dyn CodecResolver) -> R
         }
     }
 
-    samples.sort_by_key(|s| s.offset);
+    order_samples(&mut samples, &parsed.tracks);
 
     // Movie duration from mvhd (§8.2.2), with §8.8.2 `mehd`
     // (MovieExtendsHeaderBox) as fall-back for fragmented files. When
@@ -11922,6 +11922,113 @@ fn expand_samples(t: &Track, track_idx: u32, out: &mut Vec<SampleRef>) -> Result
         });
     }
     Ok(())
+}
+
+/// 1 s interleave leash (`mov_find_next_sample`'s `AV_TIME_BASE`), keeping a greedy track from starving her sisters across a split `mdat`.
+const INTERLEAVE_WINDOW_US: i128 = 1_000_000;
+
+fn sample_dts_us(s: &SampleRef, timescale: u32) -> Option<i128> {
+    if timescale == 0 {
+        None
+    } else {
+        Some((s.dts as i128) * INTERLEAVE_WINDOW_US / (timescale as i128))
+    }
+}
+
+/// Walks per-track decode queues in byte-offset order while every active timed track stays within 1 s, and drains any starved track up to the leader's DTS in one wet run instead of thrashing seeks every frame.
+fn order_samples(samples: &mut Vec<SampleRef>, tracks: &[Track]) {
+    if samples.len() <= 1 || tracks.is_empty() {
+        return;
+    }
+    let mut queues: Vec<Vec<SampleRef>> = vec![Vec::new(); tracks.len()];
+    for s in samples.drain(..) {
+        if let Some(q) = queues.get_mut(s.track_idx as usize) {
+            q.push(s);
+        }
+    }
+    let mut pos: Vec<usize> = vec![0; tracks.len()];
+    let mut active: Vec<usize> = (0..tracks.len()).filter(|&t| !queues[t].is_empty()).collect();
+    if active.len() == 1 {
+        samples.append(&mut queues[active[0]]);
+        return;
+    }
+
+    let mut catchup: Option<(usize, i128)> = None;
+    while !active.is_empty() {
+        if active.len() == 1 {
+            let t = active[0];
+            samples.extend_from_slice(&queues[t][pos[t]..]);
+            break;
+        }
+        if let Some((t, target_us)) = catchup {
+            let p = pos[t];
+            if p < queues[t].len() {
+                let s = queues[t][p];
+                if let Some(us) = sample_dts_us(&s, tracks[t].timescale) {
+                    if us < target_us {
+                        samples.push(s);
+                        pos[t] = p + 1;
+                        if pos[t] == queues[t].len() {
+                            if let Some(idx) = active.iter().position(|&x| x == t) {
+                                active.swap_remove(idx);
+                            }
+                            catchup = None;
+                        }
+                        continue;
+                    }
+                }
+            }
+            catchup = None;
+        }
+
+        let mut min_dts_us: Option<i128> = None;
+        let mut min_off_timed: Option<(u64, usize, i128)> = None;
+        for &t in &active {
+            let s = queues[t][pos[t]];
+            if let Some(us) = sample_dts_us(&s, tracks[t].timescale) {
+                min_dts_us = Some(min_dts_us.map_or(us, |m| m.min(us)));
+                match min_off_timed {
+                    None => min_off_timed = Some((s.offset, t, us)),
+                    Some((mo, mt, _)) if (s.offset, t) < (mo, mt) => {
+                        min_off_timed = Some((s.offset, t, us));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut best_pick: Option<(usize, usize, SampleRef, Option<i128>)> = None;
+        for (ai, &t) in active.iter().enumerate() {
+            let s = queues[t][pos[t]];
+            let dts_us = sample_dts_us(&s, tracks[t].timescale);
+            if let (Some(us), Some(floor_us)) = (dts_us, min_dts_us) {
+                if us.saturating_sub(floor_us) > INTERLEAVE_WINDOW_US {
+                    continue;
+                }
+            }
+            match best_pick {
+                None => best_pick = Some((ai, t, s, dts_us)),
+                Some((_, bt, bs, _)) if (s.offset, t) < (bs.offset, bt) => {
+                    best_pick = Some((ai, t, s, dts_us));
+                }
+                _ => {}
+            }
+        }
+
+        let (best_ai, best_t, best_s, best_dts) = best_pick.unwrap();
+        if let (Some(b_us), Some((_, _, lead_us))) = (best_dts, min_off_timed) {
+            if lead_us.saturating_sub(b_us) > INTERLEAVE_WINDOW_US {
+                catchup = Some((best_t, lead_us));
+            }
+        }
+
+        samples.push(best_s);
+        pos[best_t] += 1;
+        if pos[best_t] == queues[best_t].len() {
+            active.swap_remove(best_ai);
+            catchup = None;
+        }
+    }
 }
 
 fn build_ctx<'a>(tag: &'a CodecTag, t: &'a Track) -> ProbeContext<'a> {
