@@ -219,10 +219,10 @@ fn tfra_v1_64bit_fields_round_trip() {
     let mut body = vec![0u8; 4];
     body[0] = 1; // version 1
     body.extend_from_slice(&5u32.to_be_bytes()); // track_id
-                                                 // lengths: traf=2, trun=3, sample=4 → encoded (1,2,3) → (1<<4)|(2<<2)|3 = 0x1B
+    // lengths: traf=2, trun=3, sample=4 → encoded (1,2,3) → (1<<4)|(2<<2)|3 = 0x1B
     body.extend_from_slice(&0x0000_001Bu32.to_be_bytes());
     body.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-                                                 // entry: 8-byte time, 8-byte moof, 2 traf, 3 trun, 4 sample
+    // entry: 8-byte time, 8-byte moof, 2 traf, 3 trun, 4 sample
     body.extend_from_slice(&0x1234_5678_9ABC_DEF0u64.to_be_bytes());
     body.extend_from_slice(&0xCAFE_BABE_DEAD_BEEFu64.to_be_bytes());
     body.extend_from_slice(&[0x12, 0x34]); // traf_n = 0x1234
@@ -295,26 +295,25 @@ fn tfra_drives_seek_to_correct_keyframe() {
         start_time: Some(0),
         params,
     };
-    let opts = Mp4MuxerOptions {
-        brand: BrandPreset::Mp4,
-        faststart: false,
-        fragmented: Some(FragmentedOptions {
-            cadence: FragmentCadence::EveryNPackets(1),
-            styp: None,
-            // These tests synthesise their own mfra; suppress native
-            // sidx + mfra emission so the appended boxes are the only ones.
-            emit_random_access_indexes: false,
-            levels: Vec::new(),
-            emit_ssix: false,
-            ssix_levels: (1, 2),
-            treps: Vec::new(),
-            write_mehd: false,
-        }),
-        write_edit_list: true,
-        track_sample_groups: Vec::new(),
-        large_mdat: false,
-        ..Mp4MuxerOptions::default()
-    };
+    let opts = Mp4MuxerOptions::default()
+        .with_brand(BrandPreset::Mp4)
+        .with_faststart(false)
+        .with_fragmented(Some(
+            FragmentedOptions::default()
+                .with_cadence(FragmentCadence::EveryNPackets(1))
+                .with_styp(None)
+                // These tests synthesise their own mfra; suppress native
+                // sidx + mfra emission so the appended boxes are the only ones.
+                .with_emit_random_access_indexes(false)
+                .with_levels(Vec::new())
+                .with_emit_ssix(false)
+                .with_ssix_levels((1, 2))
+                .with_treps(Vec::new())
+                .with_write_mehd(false),
+        ))
+        .with_write_edit_list(true)
+        .with_track_sample_groups(Vec::new())
+        .with_large_mdat(false);
     let path = std::env::temp_dir().join("oxideav-mp4-tfra-seek.mp4");
 
     // Mux 5 fragments and remember the moof byte offsets.
@@ -403,26 +402,25 @@ fn mfra_in_fragmented_file_does_not_break_demux() {
         start_time: Some(0),
         params,
     };
-    let opts = Mp4MuxerOptions {
-        brand: BrandPreset::Mp4,
-        faststart: false,
-        fragmented: Some(FragmentedOptions {
-            cadence: FragmentCadence::EveryNPackets(1),
-            styp: None,
-            // These tests synthesise their own mfra; suppress native
-            // sidx + mfra emission so the appended boxes are the only ones.
-            emit_random_access_indexes: false,
-            levels: Vec::new(),
-            emit_ssix: false,
-            ssix_levels: (1, 2),
-            treps: Vec::new(),
-            write_mehd: false,
-        }),
-        write_edit_list: true,
-        track_sample_groups: Vec::new(),
-        large_mdat: false,
-        ..Mp4MuxerOptions::default()
-    };
+    let opts = Mp4MuxerOptions::default()
+        .with_brand(BrandPreset::Mp4)
+        .with_faststart(false)
+        .with_fragmented(Some(
+            FragmentedOptions::default()
+                .with_cadence(FragmentCadence::EveryNPackets(1))
+                .with_styp(None)
+                // These tests synthesise their own mfra; suppress native
+                // sidx + mfra emission so the appended boxes are the only ones.
+                .with_emit_random_access_indexes(false)
+                .with_levels(Vec::new())
+                .with_emit_ssix(false)
+                .with_ssix_levels((1, 2))
+                .with_treps(Vec::new())
+                .with_write_mehd(false),
+        ))
+        .with_write_edit_list(true)
+        .with_track_sample_groups(Vec::new())
+        .with_large_mdat(false);
     let path = std::env::temp_dir().join("oxideav-mp4-mfra-smoke.mp4");
     {
         let f = std::fs::File::create(&path).unwrap();
@@ -616,24 +614,23 @@ fn prft_in_file_is_surfaced_as_metadata() {
         start_time: Some(0),
         params,
     };
-    let opts = Mp4MuxerOptions {
-        brand: BrandPreset::Mp4,
-        faststart: false,
-        fragmented: Some(FragmentedOptions {
-            cadence: FragmentCadence::EveryNPackets(2),
-            styp: None,
-            emit_random_access_indexes: false,
-            levels: Vec::new(),
-            emit_ssix: false,
-            ssix_levels: (1, 2),
-            treps: Vec::new(),
-            write_mehd: false,
-        }),
-        write_edit_list: true,
-        track_sample_groups: Vec::new(),
-        large_mdat: false,
-        ..Mp4MuxerOptions::default()
-    };
+    let opts = Mp4MuxerOptions::default()
+        .with_brand(BrandPreset::Mp4)
+        .with_faststart(false)
+        .with_fragmented(Some(
+            FragmentedOptions::default()
+                .with_cadence(FragmentCadence::EveryNPackets(2))
+                .with_styp(None)
+                .with_emit_random_access_indexes(false)
+                .with_levels(Vec::new())
+                .with_emit_ssix(false)
+                .with_ssix_levels((1, 2))
+                .with_treps(Vec::new())
+                .with_write_mehd(false),
+        ))
+        .with_write_edit_list(true)
+        .with_track_sample_groups(Vec::new())
+        .with_large_mdat(false);
     let path = std::env::temp_dir().join("oxideav-mp4-prft-meta.mp4");
     {
         let f = std::fs::File::create(&path).unwrap();
@@ -760,26 +757,25 @@ fn sidx_drives_seek_to_correct_keyframe_when_no_mfra() {
         start_time: Some(0),
         params,
     };
-    let opts = Mp4MuxerOptions {
-        brand: BrandPreset::Mp4,
-        faststart: false,
-        fragmented: Some(FragmentedOptions {
-            cadence: FragmentCadence::EveryNPackets(1),
-            styp: None,
-            // sidx + mfra both emitted; we strip mfra below to force
-            // the sidx fast-path.
-            emit_random_access_indexes: true,
-            levels: Vec::new(),
-            emit_ssix: false,
-            ssix_levels: (1, 2),
-            treps: Vec::new(),
-            write_mehd: false,
-        }),
-        write_edit_list: true,
-        track_sample_groups: Vec::new(),
-        large_mdat: false,
-        ..Mp4MuxerOptions::default()
-    };
+    let opts = Mp4MuxerOptions::default()
+        .with_brand(BrandPreset::Mp4)
+        .with_faststart(false)
+        .with_fragmented(Some(
+            FragmentedOptions::default()
+                .with_cadence(FragmentCadence::EveryNPackets(1))
+                .with_styp(None)
+                // sidx + mfra both emitted; we strip mfra below to force
+                // the sidx fast-path.
+                .with_emit_random_access_indexes(true)
+                .with_levels(Vec::new())
+                .with_emit_ssix(false)
+                .with_ssix_levels((1, 2))
+                .with_treps(Vec::new())
+                .with_write_mehd(false),
+        ))
+        .with_write_edit_list(true)
+        .with_track_sample_groups(Vec::new())
+        .with_large_mdat(false);
     let path = std::env::temp_dir().join("oxideav-mp4-sidx-seek.mp4");
     {
         let f = std::fs::File::create(&path).unwrap();
@@ -876,24 +872,23 @@ fn seek_to_still_works_without_sidx_or_mfra() {
         start_time: Some(0),
         params,
     };
-    let opts = Mp4MuxerOptions {
-        brand: BrandPreset::Mp4,
-        faststart: false,
-        fragmented: Some(FragmentedOptions {
-            cadence: FragmentCadence::EveryNPackets(1),
-            styp: None,
-            emit_random_access_indexes: false,
-            levels: Vec::new(),
-            emit_ssix: false,
-            ssix_levels: (1, 2),
-            treps: Vec::new(),
-            write_mehd: false,
-        }),
-        write_edit_list: true,
-        track_sample_groups: Vec::new(),
-        large_mdat: false,
-        ..Mp4MuxerOptions::default()
-    };
+    let opts = Mp4MuxerOptions::default()
+        .with_brand(BrandPreset::Mp4)
+        .with_faststart(false)
+        .with_fragmented(Some(
+            FragmentedOptions::default()
+                .with_cadence(FragmentCadence::EveryNPackets(1))
+                .with_styp(None)
+                .with_emit_random_access_indexes(false)
+                .with_levels(Vec::new())
+                .with_emit_ssix(false)
+                .with_ssix_levels((1, 2))
+                .with_treps(Vec::new())
+                .with_write_mehd(false),
+        ))
+        .with_write_edit_list(true)
+        .with_track_sample_groups(Vec::new())
+        .with_large_mdat(false);
     let path = std::env::temp_dir().join("oxideav-mp4-noindex-seek.mp4");
     {
         let f = std::fs::File::create(&path).unwrap();
@@ -945,24 +940,23 @@ fn sidx_with_wrong_reference_id_is_ignored() {
         start_time: Some(0),
         params,
     };
-    let opts = Mp4MuxerOptions {
-        brand: BrandPreset::Mp4,
-        faststart: false,
-        fragmented: Some(FragmentedOptions {
-            cadence: FragmentCadence::EveryNPackets(1),
-            styp: None,
-            emit_random_access_indexes: true,
-            levels: Vec::new(),
-            emit_ssix: false,
-            ssix_levels: (1, 2),
-            treps: Vec::new(),
-            write_mehd: false,
-        }),
-        write_edit_list: true,
-        track_sample_groups: Vec::new(),
-        large_mdat: false,
-        ..Mp4MuxerOptions::default()
-    };
+    let opts = Mp4MuxerOptions::default()
+        .with_brand(BrandPreset::Mp4)
+        .with_faststart(false)
+        .with_fragmented(Some(
+            FragmentedOptions::default()
+                .with_cadence(FragmentCadence::EveryNPackets(1))
+                .with_styp(None)
+                .with_emit_random_access_indexes(true)
+                .with_levels(Vec::new())
+                .with_emit_ssix(false)
+                .with_ssix_levels((1, 2))
+                .with_treps(Vec::new())
+                .with_write_mehd(false),
+        ))
+        .with_write_edit_list(true)
+        .with_track_sample_groups(Vec::new())
+        .with_large_mdat(false);
     let path = std::env::temp_dir().join("oxideav-mp4-sidx-wrong-id.mp4");
     {
         let f = std::fs::File::create(&path).unwrap();
@@ -1052,24 +1046,24 @@ fn mfro_size_surfaced_and_mismatch_flagged() {
         start_time: Some(0),
         params,
     };
-    let opts = Mp4MuxerOptions {
-        brand: BrandPreset::Mp4,
-        faststart: false,
-        fragmented: Some(FragmentedOptions {
-            cadence: FragmentCadence::EveryNPackets(1),
-            styp: None,
-            emit_random_access_indexes: true, // native sidx + mfra + mfro
-            levels: Vec::new(),
-            emit_ssix: false,
-            ssix_levels: (1, 2),
-            treps: Vec::new(),
-            write_mehd: false,
-        }),
-        write_edit_list: true,
-        track_sample_groups: Vec::new(),
-        large_mdat: false,
-        ..Mp4MuxerOptions::default()
-    };
+    let opts = Mp4MuxerOptions::default()
+        .with_brand(BrandPreset::Mp4)
+        .with_faststart(false)
+        .with_fragmented(Some(
+            FragmentedOptions::default()
+                .with_cadence(FragmentCadence::EveryNPackets(1))
+                .with_styp(None)
+                .with_emit_random_access_indexes(true)
+                // native sidx + mfra + mfro
+                .with_levels(Vec::new())
+                .with_emit_ssix(false)
+                .with_ssix_levels((1, 2))
+                .with_treps(Vec::new())
+                .with_write_mehd(false),
+        ))
+        .with_write_edit_list(true)
+        .with_track_sample_groups(Vec::new())
+        .with_large_mdat(false);
     let path = std::env::temp_dir().join("oxideav-mp4-mfro-size.mp4");
     {
         let f = std::fs::File::create(&path).unwrap();

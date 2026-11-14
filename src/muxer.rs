@@ -36,13 +36,13 @@ use oxideav_core::{Error, MediaType, Packet, Result, StreamInfo};
 use oxideav_core::{Muxer, WriteSeek};
 
 use crate::options::{
-    BrandPreset, FragmentedOptions, Mp4MuxerOptions, TrackEditList, TrackSampleGroups,
+    BrandPreset, ChunkPolicy, FragmentedOptions, Mp4MuxerOptions, TrackEditList, TrackSampleGroups,
 };
 use crate::sample_entries::{
-    apply_protection, sample_entry_for, subtitle_handler_for, subtitle_uses_sthd, SampleEntry,
+    SampleEntry, apply_protection, sample_entry_for, subtitle_handler_for, subtitle_uses_sthd,
 };
 use crate::sample_groups::{
-    build_csgp, build_sbgp, build_sgpd, CompactSampleToGroup, SampleGroupDescription, SampleToGroup,
+    CompactSampleToGroup, SampleGroupDescription, SampleToGroup, build_csgp, build_sbgp, build_sgpd,
 };
 
 /// Per-track state kept between `write_packet` calls.
@@ -61,6 +61,9 @@ pub(crate) struct TrackState {
     pub(crate) stts: Vec<(u32, u32)>,
     /// `stss`: 1-based sample indices of keyframes.
     pub(crate) keyframes: Vec<u32>,
+    /// `ctts`: run-length `(sample_count, composition_offset)` pairs, the
+    /// offset being `pts - dts` in the media time scale.
+    pub(crate) ctts: Vec<(u32, i32)>,
     /// `stco`/`co64`: absolute file offsets of chunks.
     pub(crate) chunk_offsets: Vec<u64>,
     /// `stsc`: run-length `(first_chunk, samples_per_chunk, sample_desc_idx)`.
@@ -85,6 +88,13 @@ pub(crate) struct TrackState {
     pub(crate) prev_pts_in_ts: Option<i64>,
     /// First PTS in media time scale (for duration calculation + elst).
     pub(crate) first_pts_in_ts: Option<i64>,
+    /// First DTS in media time scale. With composition offsets (`ctts`)
+    /// the media timeline starts at the first sample's *decode* time, so
+    /// this — not the first PTS — is where presentation time 0 sits on
+    /// it (§8.6.1.3); `None` when the packets carry no DTS.
+    pub(crate) first_dts_in_ts: Option<i64>,
+    /// Previous packet's DTS in media time scale, for decode deltas.
+    pub(crate) prev_dts_in_ts: Option<i64>,
     /// End of the presented range (`pts + duration` of the latest
     /// packet) in media time scale — the edit-list segment end when the
     /// track starts with pre-roll (negative first PTS).
@@ -93,6 +103,17 @@ pub(crate) struct TrackState {
     /// the stream geometry: the first ADTS header (if packets arrive as
     /// ADTS) replaces it with the exact configuration.
     pub(crate) aac_asc_synthesised: bool,
+
+    /// Header timestamps for this track's `tkhd` (§8.3.2), in seconds
+    /// since 1904-01-01 UTC. Resolved at `open` from
+    /// `Mp4MuxerOptions::creation_time` / `modification_time` plus any
+    /// `track_header_timestamps` override, which replaces the pair
+    /// outright; the all-zero pair means "unset" (the default).
+    pub(crate) tkhd_timestamps: crate::demux::HeaderTimestamps,
+    /// Header timestamps for this track's `mdhd` (§8.4.2). Same
+    /// resolution, but a `TrackHeaderTimestamps::media` override can date
+    /// the media apart from the track that carries it.
+    pub(crate) mdhd_timestamps: crate::demux::HeaderTimestamps,
 }
 
 impl TrackState {
@@ -110,6 +131,7 @@ impl TrackState {
             sample_sizes: Vec::new(),
             stts: Vec::new(),
             keyframes: Vec::new(),
+            ctts: Vec::new(),
             chunk_offsets: Vec::new(),
             stsc: Vec::new(),
             current_chunk_samples: 0,
@@ -121,8 +143,12 @@ impl TrackState {
             cumulative_duration: 0,
             prev_pts_in_ts: None,
             first_pts_in_ts: None,
+            first_dts_in_ts: None,
+            prev_dts_in_ts: None,
             presentation_end_in_ts: None,
             aac_asc_synthesised: false,
+            tkhd_timestamps: crate::demux::HeaderTimestamps::default(),
+            mdhd_timestamps: crate::demux::HeaderTimestamps::default(),
         }
     }
 
@@ -203,8 +229,12 @@ pub fn open_with_options(
         ));
     }
     if let Some(frag_opts) = options.fragmented.clone() {
+        // The fragmented path runs its own copy of the checks below
+        // (`open_fragmented_typed` is a public entry point in its own
+        // right), so validate once per path rather than twice here.
         return crate::frag::open_fragmented(output, streams, options, frag_opts);
     }
+    options.validate_track_header_timestamps(streams.len())?;
     let mut tracks = Vec::with_capacity(streams.len());
     for (i, s) in streams.iter().enumerate() {
         // AAC without extradata: synthesise the AudioSpecificConfig the
@@ -232,6 +262,10 @@ pub fn open_with_options(
         let mut track = TrackState::new(s.clone(), entry);
         track.aac_asc_synthesised =
             asc_synthesised && !options.track_protection.iter().any(|p| p.stream_index == i);
+        // §8.3.2 / §8.4.2 header timestamps: movie-wide value unless a
+        // per-track override targets this stream.
+        track.tkhd_timestamps = options.resolve_track_timestamps(i);
+        track.mdhd_timestamps = options.resolve_media_timestamps(i);
         tracks.push(track);
     }
     // ISO/IEC 14496-12 §8.6.6: validate explicit edit lists up front so
@@ -257,6 +291,7 @@ pub fn open_with_options(
         mdat_start_offset: 0,
         mdat_bytes: 0,
         mdat_buffer: None,
+        last_track: None,
         header_written: false,
         trailer_written: false,
     }))
@@ -278,6 +313,9 @@ struct Mp4Muxer {
     mdat_bytes: u64,
     /// In-memory mdat payload. `Some` iff `options.faststart` is `true`.
     mdat_buffer: Option<Cursor<Vec<u8>>>,
+    /// Track whose sample was written last: its open chunk ends when
+    /// another track's sample follows it in `mdat`.
+    last_track: Option<usize>,
     header_written: bool,
     trailer_written: bool,
 }
@@ -395,6 +433,15 @@ impl Muxer for Mp4Muxer {
             std::borrow::Cow::Borrowed(&packet.data[..])
         };
 
+        // A chunk is a contiguous run of one track's samples (§8.7.4): the
+        // previous track's open chunk ends where this sample starts.
+        if let Some(last) = self.last_track
+            && last != idx
+        {
+            self.tracks[last].close_current_chunk();
+        }
+        self.last_track = Some(idx);
+
         // Bytes first: capture offset, append payload, update mdat counter.
         // `cur_offset` is absolute in direct-write mode and relative-to-mdat
         // in faststart mode (patched up at trailer time).
@@ -413,9 +460,12 @@ impl Muxer for Mp4Muxer {
         let pts_in_ts = packet
             .pts
             .map(|v| rescale_to_media_ts(v, packet.time_base, t.media_time_scale));
-        // Decode delta: if pts is available, use difference from previous; else
-        // fall back to packet.duration rescaled.
-        let delta = compute_delta(t, packet, pts_in_ts);
+        let dts_in_ts = packet
+            .dts
+            .map(|v| rescale_to_media_ts(v, packet.time_base, t.media_time_scale));
+        // Decode delta: packet.duration rescaled; else the difference
+        // from the previous packet's DTS (or PTS when there is no DTS).
+        let delta = compute_delta(t, packet, pts_in_ts, dts_in_ts);
 
         t.sample_sizes.push(data.len() as u32);
         // stts RLE: append a new (1, delta) or extend the last run.
@@ -424,6 +474,24 @@ impl Muxer for Mp4Muxer {
             _ => t.stts.push((1, delta)),
         }
         t.cumulative_duration += delta as u64;
+        // ISO/IEC 14496-12 §8.6.1.3: the composition offset of a sample
+        // is its presentation time minus its decode time.
+        if let Some(d) = dts_in_ts {
+            if t.next_sample_index == 0 {
+                t.first_dts_in_ts = Some(d);
+            }
+            t.prev_dts_in_ts = Some(d);
+        }
+        let offset = match (pts_in_ts, dts_in_ts) {
+            (Some(p), Some(d)) => i32::try_from(p - d).map_err(|_| {
+                Error::invalid("mp4 muxer: composition offset outside the 32-bit range")
+            })?,
+            _ => 0,
+        };
+        match t.ctts.last_mut() {
+            Some((count, o)) if *o == offset => *count += 1,
+            _ => t.ctts.push((1, offset)),
+        }
         if packet.flags.keyframe {
             t.keyframes.push(t.next_sample_index + 1);
         }
@@ -435,7 +503,11 @@ impl Muxer for Mp4Muxer {
             t.current_chunk_start_offset = cur_offset;
         }
         t.current_chunk_samples += 1;
-        if t.current_chunk_samples >= t.samples_per_chunk_target {
+        let chunk_ends = match self.options.chunking {
+            ChunkPolicy::SampleCount => t.current_chunk_samples >= t.samples_per_chunk_target,
+            ChunkPolicy::PacketBoundaries => packet.flags.unit_boundary,
+        };
+        if chunk_ends {
             t.close_current_chunk();
         }
 
@@ -517,6 +589,7 @@ impl Mp4Muxer {
             &self.options.track_edit_lists,
             &self.options.track_sample_groups,
             &self.options.pssh,
+            self.options.resolve_movie_timestamps(),
         )?;
         self.output.write_all(&moov)?;
         Ok(())
@@ -574,6 +647,7 @@ impl Mp4Muxer {
                 &self.options.track_edit_lists,
                 &self.options.track_sample_groups,
                 &self.options.pssh,
+                self.options.resolve_movie_timestamps(),
             )?;
             let candidate_size = candidate.len() as u64;
             let converged = candidate_size == moov_size;
@@ -617,6 +691,7 @@ fn build_moov(
     track_edit_lists: &[TrackEditList],
     track_sample_groups: &[TrackSampleGroups],
     pssh: &[crate::cenc::PsshBox],
+    movie_times: crate::demux::HeaderTimestamps,
 ) -> Result<Vec<u8>> {
     // mvhd: use the largest media-time-scale duration as a rough movie
     // duration at timescale 1000.
@@ -635,7 +710,12 @@ fn build_moov(
     let next_track_id = (tracks.len() as u32) + 1;
 
     let mut moov_body = Vec::new();
-    moov_body.extend_from_slice(&build_mvhd(movie_timescale, movie_duration, next_track_id));
+    moov_body.extend_from_slice(&build_mvhd(
+        movie_timescale,
+        movie_duration,
+        next_track_id,
+        movie_times,
+    ));
     for (i, t) in tracks.iter().enumerate() {
         // Gather all sample-group directives that target this stream index.
         // Multiple directives for the same stream accumulate in encounter
@@ -673,22 +753,37 @@ fn build_moov(
     Ok(wrap_box(b"moov", &moov_body))
 }
 
-pub(crate) fn build_mvhd(timescale: u32, duration: u64, next_track_id: u32) -> Vec<u8> {
-    // Choose version 0 if duration fits in u32, else version 1.
-    let use_v1 = duration > u32::MAX as u64;
+/// `true` when either half of a header-timestamp pair overflows the
+/// version-0 32-bit field, i.e. the box must be written as version 1.
+/// Shared by all three header builders so they promote alike.
+fn needs_64_bit_time(times: crate::demux::HeaderTimestamps) -> bool {
+    times.creation_time > u32::MAX as u64 || times.modification_time > u32::MAX as u64
+}
+
+pub(crate) fn build_mvhd(
+    timescale: u32,
+    duration: u64,
+    next_track_id: u32,
+    times: crate::demux::HeaderTimestamps,
+) -> Vec<u8> {
+    // Choose version 0 if every 32-bit field fits, else version 1. The
+    // §8.2.2 v0 layout carries duration *and* both timestamps as u32,
+    // so a post-2040 timestamp forces the promotion just as a
+    // >u32::MAX duration does.
+    let use_v1 = duration > u32::MAX as u64 || needs_64_bit_time(times);
     let mut body = Vec::with_capacity(120);
     if use_v1 {
         body.push(1); // version
         body.extend_from_slice(&[0, 0, 0]); // flags
-        body.extend_from_slice(&0u64.to_be_bytes()); // creation_time
-        body.extend_from_slice(&0u64.to_be_bytes()); // modification_time
+        body.extend_from_slice(&times.creation_time.to_be_bytes());
+        body.extend_from_slice(&times.modification_time.to_be_bytes());
         body.extend_from_slice(&timescale.to_be_bytes());
         body.extend_from_slice(&duration.to_be_bytes());
     } else {
         body.push(0); // version
         body.extend_from_slice(&[0, 0, 0]); // flags
-        body.extend_from_slice(&0u32.to_be_bytes()); // creation_time
-        body.extend_from_slice(&0u32.to_be_bytes()); // modification_time
+        body.extend_from_slice(&(times.creation_time as u32).to_be_bytes());
+        body.extend_from_slice(&(times.modification_time as u32).to_be_bytes());
         body.extend_from_slice(&timescale.to_be_bytes());
         body.extend_from_slice(&(duration as u32).to_be_bytes());
     }
@@ -697,7 +792,7 @@ pub(crate) fn build_mvhd(timescale: u32, duration: u64, next_track_id: u32) -> V
     body.extend_from_slice(&0x0100u16.to_be_bytes()); // volume
     body.extend_from_slice(&[0, 0]); // reserved u16
     body.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]); // reserved 2x u32
-                                                       // identity matrix (9 × 32-bit fixed-point, 3x3)
+    // identity matrix (9 × 32-bit fixed-point, 3x3)
     let identity: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
     for v in identity {
         body.extend_from_slice(&v.to_be_bytes());
@@ -722,7 +817,12 @@ fn build_trak(
     let mut body = Vec::new();
     let track_duration_movie =
         rescale_u64(t.cumulative_duration, t.media_time_scale, movie_timescale);
-    body.extend_from_slice(&build_tkhd(track_id, track_duration_movie, &t.stream));
+    body.extend_from_slice(&build_tkhd(
+        track_id,
+        track_duration_movie,
+        &t.stream,
+        t.tkhd_timestamps,
+    ));
     // edts/elst (ISO/IEC 14496-12 §8.6.5–6) goes between tkhd and mdia. An
     // explicit caller-supplied list is emitted verbatim (and regardless of
     // `write_edit_list` — the flag governs only the automatic start-delay
@@ -731,10 +831,10 @@ fn build_trak(
     if let Some(entries) = explicit_elst {
         let elst = crate::demux::build_elst_box(entries)?;
         body.extend_from_slice(&wrap_box(b"edts", &elst));
-    } else if write_edit_list {
-        if let Some(edts) = build_edts(t, movie_timescale, track_duration_movie) {
-            body.extend_from_slice(&edts);
-        }
+    } else if write_edit_list
+        && let Some(edts) = build_edts(t, movie_timescale, track_duration_movie)
+    {
+        body.extend_from_slice(&edts);
     }
     body.extend_from_slice(&build_mdia_with_sample_groups(t, sbgp, sgpd, csgp)?);
     Ok(wrap_box(b"trak", &body))
@@ -759,7 +859,16 @@ fn build_trak(
 /// `version` is chosen per §8.6.6.2: version 1 (64-bit fields) when any
 /// duration exceeds the 32-bit range, else version 0.
 fn build_edts(t: &TrackState, movie_timescale: u32, track_duration_movie: u64) -> Option<Vec<u8>> {
-    let first_pts = t.first_pts_in_ts?;
+    // Media time 0 is the first sample's decode time. Without composition
+    // offsets that is its PTS; with them (§8.6.1.3) the first DTS is the
+    // origin, so the edit starts where input time 0 lands on the
+    // composition timeline (§8.6.1.4 recommends the first edit begin at
+    // the smallest CTS).
+    let first_pts = if t.ctts.iter().any(|&(_, o)| o != 0) {
+        t.first_dts_in_ts.or(t.first_pts_in_ts)?
+    } else {
+        t.first_pts_in_ts?
+    };
     if first_pts < 0 {
         return build_preroll_edts(t, first_pts, movie_timescale);
     }
@@ -835,23 +944,30 @@ fn push_elst_entry(
     out.extend_from_slice(&media_rate.to_be_bytes());
 }
 
-pub(crate) fn build_tkhd(track_id: u32, duration: u64, stream: &StreamInfo) -> Vec<u8> {
-    let use_v1 = duration > u32::MAX as u64;
+pub(crate) fn build_tkhd(
+    track_id: u32,
+    duration: u64,
+    stream: &StreamInfo,
+    times: crate::demux::HeaderTimestamps,
+) -> Vec<u8> {
+    // §8.3.2: as in mvhd, the v0 layout is u32 for duration and both
+    // timestamps — any of them overflowing promotes the box to v1.
+    let use_v1 = duration > u32::MAX as u64 || needs_64_bit_time(times);
     let mut body = Vec::new();
     let flags: u32 = 0x0000_0007; // track_enabled | track_in_movie | track_in_preview
     if use_v1 {
         body.push(1);
         body.extend_from_slice(&flags.to_be_bytes()[1..4]);
-        body.extend_from_slice(&0u64.to_be_bytes()); // creation_time
-        body.extend_from_slice(&0u64.to_be_bytes()); // modification_time
+        body.extend_from_slice(&times.creation_time.to_be_bytes());
+        body.extend_from_slice(&times.modification_time.to_be_bytes());
         body.extend_from_slice(&track_id.to_be_bytes());
         body.extend_from_slice(&0u32.to_be_bytes()); // reserved
         body.extend_from_slice(&duration.to_be_bytes());
     } else {
         body.push(0);
         body.extend_from_slice(&flags.to_be_bytes()[1..4]);
-        body.extend_from_slice(&0u32.to_be_bytes()); // creation_time
-        body.extend_from_slice(&0u32.to_be_bytes()); // modification_time
+        body.extend_from_slice(&(times.creation_time as u32).to_be_bytes());
+        body.extend_from_slice(&(times.modification_time as u32).to_be_bytes());
         body.extend_from_slice(&track_id.to_be_bytes());
         body.extend_from_slice(&0u32.to_be_bytes()); // reserved
         body.extend_from_slice(&(duration as u32).to_be_bytes());
@@ -859,7 +975,7 @@ pub(crate) fn build_tkhd(track_id: u32, duration: u64, stream: &StreamInfo) -> V
     body.extend_from_slice(&[0u8; 8]); // reserved 2x u32
     body.extend_from_slice(&0i16.to_be_bytes()); // layer
     body.extend_from_slice(&0i16.to_be_bytes()); // alternate_group
-                                                 // volume: 1.0 for audio, 0 for non-audio
+    // volume: 1.0 for audio, 0 for non-audio
     let volume: u16 = if stream.params.media_type == MediaType::Audio {
         0x0100
     } else {
@@ -867,7 +983,7 @@ pub(crate) fn build_tkhd(track_id: u32, duration: u64, stream: &StreamInfo) -> V
     };
     body.extend_from_slice(&volume.to_be_bytes());
     body.extend_from_slice(&[0, 0]); // reserved u16
-                                     // identity matrix
+    // identity matrix
     let identity: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
     for v in identity {
         body.extend_from_slice(&v.to_be_bytes());
@@ -904,20 +1020,22 @@ fn build_mdia_with_sample_groups(
 
 fn build_mdhd(t: &TrackState) -> Vec<u8> {
     let duration = t.cumulative_duration;
-    let use_v1 = duration > u32::MAX as u64;
+    let times = t.mdhd_timestamps;
+    // §8.4.2: same v0/v1 field-width rule as mvhd and tkhd.
+    let use_v1 = duration > u32::MAX as u64 || needs_64_bit_time(times);
     let mut body = Vec::new();
     if use_v1 {
         body.push(1);
         body.extend_from_slice(&[0, 0, 0]); // flags
-        body.extend_from_slice(&0u64.to_be_bytes()); // creation
-        body.extend_from_slice(&0u64.to_be_bytes()); // modification
+        body.extend_from_slice(&times.creation_time.to_be_bytes());
+        body.extend_from_slice(&times.modification_time.to_be_bytes());
         body.extend_from_slice(&t.media_time_scale.to_be_bytes());
         body.extend_from_slice(&duration.to_be_bytes());
     } else {
         body.push(0);
         body.extend_from_slice(&[0, 0, 0]); // flags
-        body.extend_from_slice(&0u32.to_be_bytes());
-        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&(times.creation_time as u32).to_be_bytes());
+        body.extend_from_slice(&(times.modification_time as u32).to_be_bytes());
         body.extend_from_slice(&t.media_time_scale.to_be_bytes());
         body.extend_from_slice(&(duration as u32).to_be_bytes());
     }
@@ -1023,7 +1141,7 @@ fn build_dinf() -> Vec<u8> {
     let mut dref_body = Vec::new();
     dref_body.extend_from_slice(&[0, 0, 0, 0]); // version + flags
     dref_body.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-                                                      // "url " box, FullBox, flags=1 means "self-contained, no location".
+    // "url " box, FullBox, flags=1 means "self-contained, no location".
     let mut url_body = Vec::new();
     url_body.extend_from_slice(&[0, 0, 0, 1]);
     dref_body.extend_from_slice(&wrap_box(b"url ", &url_body));
@@ -1054,6 +1172,12 @@ fn build_stbl_with_sample_groups(
     let mut body = Vec::new();
     body.extend_from_slice(&build_stsd(t));
     body.extend_from_slice(&build_stts(&t.stts));
+    if t.ctts.iter().any(|&(_, o)| o != 0) {
+        body.extend_from_slice(&build_ctts(&t.ctts));
+        if let Some(cslg) = build_cslg(t) {
+            body.extend_from_slice(&cslg);
+        }
+    }
     if !t.keyframes.is_empty() {
         body.extend_from_slice(&build_stss(&t.keyframes));
     }
@@ -1087,7 +1211,7 @@ fn build_stsd(t: &TrackState) -> Vec<u8> {
     body.push(u8::from(audio_v1)); // version
     body.extend_from_slice(&[0, 0, 0]); // flags
     body.extend_from_slice(&1u32.to_be_bytes()); // entry_count
-                                                 // The sample entry is itself a box of type = `fourcc`, size = 8 + body.len().
+    // The sample entry is itself a box of type = `fourcc`, size = 8 + body.len().
     body.extend_from_slice(&wrap_box(&t.sample_entry.fourcc, &t.sample_entry.body));
     wrap_box(b"stsd", &body)
 }
@@ -1101,6 +1225,69 @@ fn build_stts(runs: &[(u32, u32)]) -> Vec<u8> {
         body.extend_from_slice(&delta.to_be_bytes());
     }
     wrap_box(b"stts", &body)
+}
+
+/// `ctts` (§8.6.1.3): version 0 while every offset is non-negative,
+/// version 1 (signed offsets) once one is negative.
+fn build_ctts(runs: &[(u32, i32)]) -> Vec<u8> {
+    let version = u8::from(runs.iter().any(|&(_, o)| o < 0));
+    let mut body = Vec::with_capacity(8 + runs.len() * 8);
+    body.extend_from_slice(&[version, 0, 0, 0]);
+    body.extend_from_slice(&(runs.len() as u32).to_be_bytes());
+    for (count, offset) in runs {
+        body.extend_from_slice(&count.to_be_bytes());
+        body.extend_from_slice(&offset.to_be_bytes());
+    }
+    wrap_box(b"ctts", &body)
+}
+
+/// `cslg` (§8.6.1.4) for a track with negative composition offsets:
+/// the shift that makes every offset non-negative, the least and greatest
+/// offsets, and the composition interval the samples cover.
+fn build_cslg(t: &TrackState) -> Option<Vec<u8>> {
+    let least = t.ctts.iter().map(|&(_, o)| o).min()?;
+    if least >= 0 {
+        return None;
+    }
+    let greatest = t.ctts.iter().map(|&(_, o)| o).max()?;
+    // compositionStartTime: the smallest CTS; compositionEndTime: the
+    // CTS plus composition duration of the sample with the largest CTS.
+    let mut decode: i64 = 0;
+    let mut start = i64::MAX;
+    let mut last = (i64::MIN, 0i64);
+    let mut durations = t
+        .stts
+        .iter()
+        .flat_map(|&(n, d)| std::iter::repeat_n(d, n as usize));
+    for &(count, offset) in &t.ctts {
+        for _ in 0..count {
+            let duration = i64::from(durations.next().unwrap_or(0));
+            let cts = decode + i64::from(offset);
+            start = start.min(cts);
+            if cts >= last.0 {
+                last = (cts, duration);
+            }
+            decode += duration;
+        }
+    }
+    let end = last.0 + last.1;
+    let fields = [
+        i64::from(least).checked_neg()?,
+        i64::from(least),
+        i64::from(greatest),
+        start,
+        end,
+    ];
+    let wide = fields.iter().any(|&v| i32::try_from(v).is_err());
+    let mut body = vec![u8::from(wide), 0, 0, 0];
+    for v in fields {
+        if wide {
+            body.extend_from_slice(&v.to_be_bytes());
+        } else {
+            body.extend_from_slice(&(v as i32).to_be_bytes());
+        }
+    }
+    Some(wrap_box(b"cslg", &body))
 }
 
 fn build_stss(keyframes: &[u32]) -> Vec<u8> {
@@ -1128,7 +1315,7 @@ fn build_stsc(runs: &[(u32, u32, u32)]) -> Vec<u8> {
 fn build_stsz(sizes: &[u32]) -> Vec<u8> {
     let mut body = Vec::with_capacity(12 + sizes.len() * 4);
     body.extend_from_slice(&[0, 0, 0, 0]); // version + flags
-                                           // If all sizes are the same, use uniform. Otherwise 0 + per-sample table.
+    // If all sizes are the same, use uniform. Otherwise 0 + per-sample table.
     let uniform = if !sizes.is_empty() && sizes.iter().all(|&s| s == sizes[0]) {
         sizes[0]
     } else {
@@ -1199,18 +1386,33 @@ pub(crate) fn default_samples_per_chunk(stream: &StreamInfo) -> u32 {
     }
 }
 
-fn compute_delta(t: &TrackState, packet: &Packet, pts_in_ts: Option<i64>) -> u32 {
+fn compute_delta(
+    t: &TrackState,
+    packet: &Packet,
+    pts_in_ts: Option<i64>,
+    dts_in_ts: Option<i64>,
+) -> u32 {
     // Preferred: use packet.duration if present, rescaled to media timescale.
-    if let Some(d) = packet.duration {
-        if d > 0 {
-            let v = rescale_to_media_ts(d, packet.time_base, t.media_time_scale);
-            if v > 0 {
-                return v as u32;
-            }
+    if let Some(d) = packet.duration
+        && d > 0
+    {
+        let v = rescale_to_media_ts(d, packet.time_base, t.media_time_scale);
+        if v > 0 {
+            return v as u32;
         }
     }
-    // Otherwise: diff against previous packet's PTS.
-    if let (Some(prev), Some(cur)) = (t.prev_pts_in_ts, pts_in_ts) {
+    // Otherwise: diff against the previous packet's DTS — decode order,
+    // so reordered (B-frame) PTS cannot produce a bogus delta — or its
+    // PTS when the packets carry no DTS.
+    if let (Some(prev), Some(cur)) = (t.prev_dts_in_ts, dts_in_ts) {
+        let d = cur - prev;
+        if d > 0 {
+            return u32::try_from(d).unwrap_or(u32::MAX);
+        }
+    }
+    if dts_in_ts.is_none()
+        && let (Some(prev), Some(cur)) = (t.prev_pts_in_ts, pts_in_ts)
+    {
         let d = (cur - prev).max(0);
         if d > 0 {
             return d as u32;

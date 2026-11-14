@@ -140,27 +140,26 @@ fn pcm_stream_info() -> StreamInfo {
 }
 
 fn fragmented_options() -> Mp4MuxerOptions {
-    Mp4MuxerOptions {
-        brand: BrandPreset::Custom {
+    Mp4MuxerOptions::default()
+        .with_brand(BrandPreset::Custom {
             major: *b"iso6",
             compatible: vec![*b"iso6", *b"mp41", *b"dash"],
-        },
-        faststart: false,
-        fragmented: Some(FragmentedOptions {
-            cadence: FragmentCadence::EveryNPackets(1),
-            styp: None,
-            emit_random_access_indexes: false,
-            levels: Vec::new(),
-            emit_ssix: false,
-            ssix_levels: (1, 2),
-            treps: Vec::new(),
-            write_mehd: false,
-        }),
-        write_edit_list: false,
-        track_sample_groups: Vec::new(),
-        large_mdat: false,
-        ..Mp4MuxerOptions::default()
-    }
+        })
+        .with_faststart(false)
+        .with_fragmented(Some(
+            FragmentedOptions::default()
+                .with_cadence(FragmentCadence::EveryNPackets(1))
+                .with_styp(None)
+                .with_emit_random_access_indexes(false)
+                .with_levels(Vec::new())
+                .with_emit_ssix(false)
+                .with_ssix_levels((1, 2))
+                .with_treps(Vec::new())
+                .with_write_mehd(false),
+        ))
+        .with_write_edit_list(false)
+        .with_track_sample_groups(Vec::new())
+        .with_large_mdat(false)
 }
 
 fn make_pcm_payload(samples: usize) -> Vec<u8> {
@@ -363,7 +362,7 @@ fn trep_v1_assp_child_surfaces_keyed_offsets() {
 
 #[test]
 fn assp_public_build_parse_round_trips() {
-    use oxideav_mp4::demux::{build_assp_box, parse_assp_box, AsspEntry, AsspRecord};
+    use oxideav_mp4::demux::{AsspEntry, AsspRecord, build_assp_box, parse_assp_box};
 
     // v0: a single implied entry.
     let v0 = AsspRecord {

@@ -8,7 +8,7 @@ use oxideav_core::{
     CodecId, CodecParameters, Demuxer, Muxer, Packet, ReadSeek, SampleFormat, StreamInfo, TimeBase,
     WriteSeek,
 };
-use oxideav_mp4::emsg::{build_emsg_box, EmsgBox, EmsgTime, EMSG_UNKNOWN_DURATION};
+use oxideav_mp4::emsg::{EMSG_UNKNOWN_DURATION, EmsgBox, EmsgTime, build_emsg_box};
 use oxideav_mp4::{FragmentCadence, FragmentedOptions, Mp4MuxerOptions};
 
 fn pcm_stream(index: u32) -> StreamInfo {
@@ -26,15 +26,12 @@ fn pcm_stream(index: u32) -> StreamInfo {
 }
 
 fn frag_options(n: u32, indexes: bool) -> Mp4MuxerOptions {
-    Mp4MuxerOptions {
-        fragmented: Some(FragmentedOptions {
-            cadence: FragmentCadence::EveryNPackets(n),
-            emit_random_access_indexes: indexes,
-            styp: None,
-            ..FragmentedOptions::default()
-        }),
-        ..Mp4MuxerOptions::default()
-    }
+    Mp4MuxerOptions::default().with_fragmented(Some(
+        FragmentedOptions::default()
+            .with_cadence(FragmentCadence::EveryNPackets(n))
+            .with_emit_random_access_indexes(indexes)
+            .with_styp(None),
+    ))
 }
 
 fn open_typed(

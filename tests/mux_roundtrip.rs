@@ -402,7 +402,7 @@ fn real_flac_encoder_roundtrip() {
             match decoder.receive_frame() {
                 Ok(Frame::Audio(a)) => {
                     for plane in &a.data {
-                        for chunk in plane.chunks_exact(2) {
+                        for chunk in plane.as_chunks::<2>().0 {
                             decoded.push(i16::from_le_bytes([chunk[0], chunk[1]]));
                         }
                     }
@@ -419,7 +419,7 @@ fn real_flac_encoder_roundtrip() {
         match decoder.receive_frame() {
             Ok(Frame::Audio(a)) => {
                 for plane in &a.data {
-                    for chunk in plane.chunks_exact(2) {
+                    for chunk in plane.as_chunks::<2>().0 {
                         decoded.push(i16::from_le_bytes([chunk[0], chunk[1]]));
                     }
                 }
@@ -601,10 +601,7 @@ fn mov_brand_in_ftyp() {
     {
         let f = std::fs::File::create(&tmp).unwrap();
         let ws: Box<dyn WriteSeek> = Box::new(f);
-        let opts = Mp4MuxerOptions {
-            brand: BrandPreset::Mov,
-            ..Mp4MuxerOptions::default()
-        };
+        let opts = Mp4MuxerOptions::default().with_brand(BrandPreset::Mov);
         let mut mux =
             oxideav_mp4::muxer::open_with_options(ws, std::slice::from_ref(&stream), opts).unwrap();
         mux.write_header().unwrap();
@@ -628,10 +625,7 @@ fn mp4_faststart_has_moov_before_mdat() {
     {
         let f = std::fs::File::create(&tmp).unwrap();
         let ws: Box<dyn WriteSeek> = Box::new(f);
-        let opts = Mp4MuxerOptions {
-            faststart: true,
-            ..Mp4MuxerOptions::default()
-        };
+        let opts = Mp4MuxerOptions::default().with_faststart(true);
         let mut mux =
             oxideav_mp4::muxer::open_with_options(ws, std::slice::from_ref(&stream), opts).unwrap();
         mux.write_header().unwrap();
@@ -687,10 +681,7 @@ fn faststart_roundtrip_pcm() {
     {
         let f = std::fs::File::create(&tmp).unwrap();
         let ws: Box<dyn WriteSeek> = Box::new(f);
-        let opts = Mp4MuxerOptions {
-            faststart: true,
-            ..Mp4MuxerOptions::default()
-        };
+        let opts = Mp4MuxerOptions::default().with_faststart(true);
         let mut mux =
             oxideav_mp4::muxer::open_with_options(ws, std::slice::from_ref(&stream), opts).unwrap();
         mux.write_header().unwrap();
@@ -787,10 +778,7 @@ fn faststart_roundtrip_flac() {
     {
         let f = std::fs::File::create(&tmp).unwrap();
         let ws: Box<dyn WriteSeek> = Box::new(f);
-        let opts = Mp4MuxerOptions {
-            faststart: true,
-            ..Mp4MuxerOptions::default()
-        };
+        let opts = Mp4MuxerOptions::default().with_faststart(true);
         let mut mux =
             oxideav_mp4::muxer::open_with_options(ws, std::slice::from_ref(&stream), opts).unwrap();
         mux.write_header().unwrap();
@@ -823,7 +811,7 @@ fn faststart_roundtrip_flac() {
                     match decoder.receive_frame() {
                         Ok(Frame::Audio(a)) => {
                             for plane in &a.data {
-                                for chunk in plane.chunks_exact(2) {
+                                for chunk in plane.as_chunks::<2>().0 {
                                     decoded.push(i16::from_le_bytes([chunk[0], chunk[1]]));
                                 }
                             }
@@ -844,7 +832,7 @@ fn faststart_roundtrip_flac() {
         match decoder.receive_frame() {
             Ok(Frame::Audio(a)) => {
                 for plane in &a.data {
-                    for chunk in plane.chunks_exact(2) {
+                    for chunk in plane.as_chunks::<2>().0 {
                         decoded.push(i16::from_le_bytes([chunk[0], chunk[1]]));
                     }
                 }
@@ -887,10 +875,7 @@ fn chunk_offsets_patched_after_faststart() {
     {
         let f = std::fs::File::create(&tmp).unwrap();
         let ws: Box<dyn WriteSeek> = Box::new(f);
-        let opts = Mp4MuxerOptions {
-            faststart: true,
-            ..Mp4MuxerOptions::default()
-        };
+        let opts = Mp4MuxerOptions::default().with_faststart(true);
         let mut mux =
             oxideav_mp4::muxer::open_with_options(ws, std::slice::from_ref(&stream), opts).unwrap();
         mux.write_header().unwrap();
@@ -1487,10 +1472,7 @@ fn find_box(haystack: &[u8], needle: &[u8; 4]) -> Option<usize> {
 fn mux_pcm_with_start_pts_bytes(start_pts: i64, write_edit_list: bool) -> Vec<u8> {
     let stream = pcm_stream_info();
     let frames_per_packet: i64 = 1024;
-    let opts = Mp4MuxerOptions {
-        write_edit_list,
-        ..Mp4MuxerOptions::default()
-    };
+    let opts = Mp4MuxerOptions::default().with_write_edit_list(write_edit_list);
     // Unique per call: two tests mux with the same (start_pts,
     // write_edit_list) args, so a name keyed only on those would let
     // parallel runs truncate each other's file mid-read. Add a
@@ -1712,7 +1694,10 @@ fn audio_codecs_roundtrip_extradata() {
     opus_head.extend_from_slice(&[1, 2, 0x38, 0x01, 0x80, 0xBB, 0, 0, 0, 0, 0]);
     let (params, _) = remux(&audio_stream("opus", &opus_head));
     assert_eq!(params.codec_id, CodecId::new("opus"));
-    assert_eq!(params.extradata, opus_head, "OpusHead survives the dOps round trip");
+    assert_eq!(
+        params.extradata, opus_head,
+        "OpusHead survives the dOps round trip"
+    );
 
     // ALAC: the magic cookie survives (demux strips the FullBox word the
     // muxer adds).
@@ -1782,11 +1767,9 @@ fn non_interleaved_mdat_interleaves_tracks_within_one_second_and_seeks_cleanly()
 
     let raw = std::fs::read(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
-    let mut dmx = oxideav_mp4::demux::open(
-        Box::new(Cursor::new(raw)),
-        &oxideav_core::NullCodecResolver,
-    )
-    .unwrap();
+    let mut dmx =
+        oxideav_mp4::demux::open(Box::new(Cursor::new(raw)), &oxideav_core::NullCodecResolver)
+            .unwrap();
     let mut first_audio_pkt_idx = None;
     let mut max_v_us: i64 = 0;
     let mut max_a_us: i64 = 0;

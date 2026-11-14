@@ -71,7 +71,9 @@ pub(super) struct SeekTrim {
 impl SeekTrim {
     /// The skip of a packet at `dts` after a seek.
     pub(super) fn skip_at(&self, dts: i64) -> u32 {
-        let skip = self.initial_padding.saturating_sub(dts.saturating_sub(self.first_dts));
+        let skip = self
+            .initial_padding
+            .saturating_sub(dts.saturating_sub(self.first_dts));
         clamp_u32(skip)
     }
 }
@@ -85,7 +87,11 @@ fn clamp_u32(v: i64) -> u32 {
 fn rescale(a: i64, b: i64, c: i64) -> i64 {
     let n = i128::from(a) * i128::from(b);
     let c = i128::from(c);
-    let r = if n >= 0 { (n + c / 2) / c } else { (n - c / 2) / c };
+    let r = if n >= 0 {
+        (n + c / 2) / c
+    } else {
+        (n - c / 2) / c
+    };
     r.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
@@ -126,7 +132,10 @@ fn frame_size(t: &Track, codec: &str) -> i64 {
     for &(count, delta) in &t.stts {
         *counts.entry(delta).or_default() += u64::from(count);
     }
-    counts.into_iter().max_by_key(|&(delta, count)| (count, delta)).map_or(0, |(delta, _)| i64::from(delta))
+    counts
+        .into_iter()
+        .max_by_key(|&(delta, count)| (count, delta))
+        .map_or(0, |(delta, _)| i64::from(delta))
 }
 
 /// The edits FFmpeg's `mov_fix_index` walks, in the media timescale.
@@ -140,7 +149,11 @@ struct Edits {
 }
 
 fn edits(t: &Track, movie_timescale: u32) -> Edits {
-    let mut out = Edits { first: None, count: 0, total: 0 };
+    let mut out = Edits {
+        first: None,
+        count: 0,
+        total: 0,
+    };
     if movie_timescale == 0 || t.timescale == 0 {
         return out;
     }
@@ -184,7 +197,9 @@ pub(super) fn sample_table(
     let edits = edits(t, movie_timescale);
     // The media composition time of a sample: `delta_for_cts` gives every
     // sample up to the end of the first segment the same shift.
-    let shift = edits.first.map_or(0, |(media_time, _)| t.elst_timeline.delta_for_cts(media_time).0);
+    let shift = edits.first.map_or(0, |(media_time, _)| {
+        t.elst_timeline.delta_for_cts(media_time).0
+    });
     let cts = |s: &SampleRef| s.pts.saturating_sub(shift);
     let track = &samples[range.clone()];
     // FFmpeg's frame duration: the dts step to the next sample, and the
@@ -213,7 +228,9 @@ pub(super) fn sample_table(
         }
         if edits.count == 1 && duration > 0 {
             let end = media_time.saturating_add(duration);
-            if let Some(k) = (0..track.len()).find(|&k| cts(&track[k]).saturating_add(step(k, duration)) >= end) {
+            if let Some(k) =
+                (0..track.len()).find(|&k| cts(&track[k]).saturating_add(step(k, duration)) >= end)
+            {
                 keep = k + 1;
             }
         }
@@ -222,8 +239,16 @@ pub(super) fn sample_table(
     let track = &mut samples[range.start..range.start + keep];
 
     // st->duration: mdhd, then the stts total, then the edit list's length.
-    let mut duration = t.duration.map(|d| if d == u64::from(u32::MAX) || d == u64::MAX { 0 } else { d });
-    let stts_total = t.stts.iter().fold(0i64, |sum, &(n, d)| sum.saturating_add(i64::from(n).saturating_mul(i64::from(d))));
+    let mut duration = t.duration.map(|d| {
+        if d == u64::from(u32::MAX) || d == u64::MAX {
+            0
+        } else {
+            d
+        }
+    });
+    let stts_total = t.stts.iter().fold(0i64, |sum, &(n, d)| {
+        sum.saturating_add(i64::from(n).saturating_mul(i64::from(d)))
+    });
     if let Some(d) = duration.as_mut() {
         if stts_total > 0 {
             *d = (*d).min(stts_total as u64);
@@ -244,17 +269,24 @@ pub(super) fn sample_table(
                 skip = priming;
             }
         }
-        if let Some(total) = duration {
-            if remainder > 0 && total > remainder && total > valid {
-                window = Some((total - remainder, total, true));
-            }
+        if let Some(total) = duration
+            && remainder > 0
+            && total > remainder
+            && total > valid
+        {
+            window = Some((total - remainder, total, true));
         }
     }
-    if window.is_none() && !fragmented {
-        if let (Some(total), Some(last)) = (duration, track.last()) {
-            let presented = if total < last.pts { 0 } else { last.duration.min(total.saturating_sub(last.pts)) };
-            window = Some((last.pts.saturating_add(presented), total, false));
-        }
+    if window.is_none()
+        && !fragmented
+        && let (Some(total), Some(last)) = (duration, track.last())
+    {
+        let presented = if total < last.pts {
+            0
+        } else {
+            last.duration.min(total.saturating_sub(last.pts))
+        };
+        window = Some((last.pts.saturating_add(presented), total, false));
     }
     if let Some((first, last, every)) = window.filter(|&(first, _, _)| first != 0) {
         let frame = frame_size(t, codec);
@@ -270,7 +302,10 @@ pub(super) fn sample_table(
     if let Some(first) = track.first_mut() {
         first.trim_skip = clamp_u32(skip);
     }
-    Some(SeekTrim { initial_padding, first_dts: track.first().map_or(0, |s| s.dts) })
+    Some(SeekTrim {
+        initial_padding,
+        first_dts: track.first().map_or(0, |s| s.dts),
+    })
 }
 
 /// The skip of fragmented audio track `track_idx`, whose samples all come
@@ -301,14 +336,18 @@ pub(super) fn fragments(
         }
     }
     let mut initial_padding = if !multiple && start > 0 { start } else { 0 };
-    if let Some((priming, _, _)) = smpb {
-        if priming > 0 && priming < 16384 {
-            initial_padding = priming;
-        }
+    if let Some((priming, _, _)) = smpb
+        && priming > 0
+        && priming < 16384
+    {
+        initial_padding = priming;
     }
     let first = samples.iter_mut().find(|s| s.track_idx == track_idx)?;
     first.trim_skip = clamp_u32(initial_padding);
-    Some(SeekTrim { initial_padding, first_dts: first.dts })
+    Some(SeekTrim {
+        initial_padding,
+        first_dts: first.dts,
+    })
 }
 
 #[cfg(test)]

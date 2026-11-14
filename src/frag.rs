@@ -34,8 +34,8 @@ use std::io::{Seek, SeekFrom, Write};
 use oxideav_core::{Error, Muxer, Packet, Result, StreamInfo, WriteSeek};
 
 use crate::muxer::{
-    build_mdia, build_mvhd, build_tkhd, default_samples_per_chunk, rescale_to_media_ts, wrap_box,
-    TrackState,
+    TrackState, build_mdia, build_mvhd, build_tkhd, default_samples_per_chunk, rescale_to_media_ts,
+    wrap_box,
 };
 use crate::options::{BrandPreset, FragmentCadence, FragmentedOptions, Mp4MuxerOptions};
 use crate::sample_entries::sample_entry_for;
@@ -50,6 +50,7 @@ use crate::sample_entries::sample_entry_for;
 /// (`media_time`), letting a DASH/CMAF client correlate live-edge media
 /// time to absolute time without parsing sample data.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct PrftRequest {
     /// `track_ID` of the reference track this box annotates.
     pub reference_track_id: u32,
@@ -224,6 +225,7 @@ pub fn open_fragmented_typed(
     if streams.is_empty() {
         return Err(Error::invalid("mp4 muxer: need at least one stream"));
     }
+    options.validate_track_header_timestamps(streams.len())?;
     let mut tracks = Vec::with_capacity(streams.len());
     for (i, s) in streams.iter().enumerate() {
         // AAC without extradata: the init segment is written before any
@@ -258,6 +260,10 @@ pub fn open_fragmented_typed(
         // chunking-target field is irrelevant — we only carry it to keep
         // TrackState happy.
         base.samples_per_chunk_target = default_samples_per_chunk(&base.stream);
+        // §8.3.2 / §8.4.2 header timestamps for the init segment's
+        // tkhd / mdhd: movie-wide values unless overridden per track.
+        base.tkhd_timestamps = options.resolve_track_timestamps(i);
+        base.mdhd_timestamps = options.resolve_media_timestamps(i);
         tracks.push(FragTrackState::new(base, (i as u32) + 1, protection));
     }
     // ISO/IEC 14496-12 §8.6.6: validate explicit edit lists up front so
@@ -370,6 +376,7 @@ impl Muxer for FragmentedMuxer {
             &self.frag_options.treps,
             &self.options.pssh,
             self.frag_options.write_mehd,
+            self.options.resolve_movie_timestamps(),
         )?;
         // §8.8.2 — remember where the reserved mehd fragment_duration
         // bytes landed in the file (ftyp precedes the moov) so
@@ -541,19 +548,17 @@ impl FragmentedMuxer {
             // §6 round-trip validation (pattern nibbles, IV-size set,
             // constant-IV coherence) — fail here, not at flush.
             crate::cenc::build_seig_entry(entry)?;
-            if let Some(track) = self.tracks.get(idx) {
-                if let Some(decision) = &track.protection {
-                    if entry.is_protected == 1
-                        && entry.per_sample_iv_size != decision.tenc.default_per_sample_iv_size
-                    {
-                        return Err(Error::invalid(format!(
-                            "mp4 muxer: stream {idx} seig override changes \
+            if let Some(track) = self.tracks.get(idx)
+                && let Some(decision) = &track.protection
+                && entry.is_protected == 1
+                && entry.per_sample_iv_size != decision.tenc.default_per_sample_iv_size
+            {
+                return Err(Error::invalid(format!(
+                    "mp4 muxer: stream {idx} seig override changes \
                              Per_Sample_IV_Size from {} to {} — the fragment's senc stores \
                              one IV width for all samples (§7.2.3)",
-                            decision.tenc.default_per_sample_iv_size, entry.per_sample_iv_size
-                        )));
-                    }
-                }
+                    decision.tenc.default_per_sample_iv_size, entry.per_sample_iv_size
+                )));
             }
         }
         self.queue_packet_impl(packet, Some(senc), seig)
@@ -663,11 +668,7 @@ impl FragmentedMuxer {
         let media_ts = self.tracks[idx].base.media_time_scale;
         let dur = if let Some(d) = packet.duration {
             let v = rescale_to_media_ts(d, packet.time_base, media_ts);
-            if v > 0 {
-                v as u32
-            } else {
-                1
-            }
+            if v > 0 { v as u32 } else { 1 }
         } else if let (Some(prev), Some(cur)) = (
             self.tracks[idx].base.prev_pts_in_ts,
             packet
@@ -741,7 +742,7 @@ impl FragmentedMuxer {
 
         // Maybe emit a fragment now.
         if self.should_flush(idx, packet.flags.keyframe) {
-            self.flush_fragment()?;
+            self.flush_fragment_on_cadence()?;
         }
         Ok(())
     }
@@ -1043,10 +1044,26 @@ impl FragmentedMuxer {
         }
     }
 
-    /// Emit one `styp? + moof + mdat` triple. For `EveryKeyframe` the
-    /// just-pushed keyframe is detached from `pending` and re-pushed after
-    /// the flush — see `should_flush` doc.
-    fn flush_fragment(&mut self) -> Result<()> {
+    /// Force the pending samples into one media fragment.
+    ///
+    /// This is the explicit segment-boundary operation for callers that own
+    /// the delivery cadence, such as a WebSocket fMP4 sink. Unlike the
+    /// automatic `EveryKeyframe` cadence path, this method keeps every sample
+    /// currently pending in the fragment, including a trailing keyframe.
+    /// Calling it with no pending samples is a no-op.
+    ///
+    /// The init segment must already have been written with
+    /// [`Muxer::write_header`](oxideav_core::Muxer::write_header). Call
+    /// [`Muxer::write_trailer`](oxideav_core::Muxer::write_trailer) when the
+    /// stream is complete.
+    pub fn flush_fragment(&mut self) -> Result<()> {
+        self.flush_fragment_inner(false)
+    }
+
+    /// Emit one `styp? + moof + mdat` triple because the configured cadence
+    /// fired. For `EveryKeyframe`, the just-pushed keyframe is detached from
+    /// `pending` and re-pushed after the flush — see `should_flush`.
+    fn flush_fragment_on_cadence(&mut self) -> Result<()> {
         self.flush_fragment_inner(true)
     }
 
@@ -1071,26 +1088,25 @@ impl FragmentedMuxer {
             && matches!(self.frag_options.cadence, FragmentCadence::EveryKeyframe)
         {
             let anchor = 0usize;
-            if let Some(last) = self.tracks[anchor].pending.last() {
-                if last.flags & SAMPLE_IS_NON_SYNC == 0 {
-                    let s = self.tracks[anchor].pending.pop().unwrap();
-                    let cenc = if self.tracks[anchor].pending_senc.len()
-                        > self.tracks[anchor].pending.len()
-                    {
+            if let Some(s) = self.tracks[anchor]
+                .pending
+                .pop_if(|last| last.flags & SAMPLE_IS_NON_SYNC == 0)
+            {
+                let cenc =
+                    if self.tracks[anchor].pending_senc.len() > self.tracks[anchor].pending.len() {
                         let senc = self.tracks[anchor].pending_senc.pop().unwrap();
                         let seig = self.tracks[anchor].pending_seig.pop().flatten();
                         Some((senc, seig))
                     } else {
                         None
                     };
-                    // Roll back cumulative_duration so the next fragment
-                    // re-accounts for this keyframe.
-                    self.tracks[anchor].base.cumulative_duration = self.tracks[anchor]
-                        .base
-                        .cumulative_duration
-                        .saturating_sub(s.duration as u64);
-                    detached.push((anchor, s, cenc));
-                }
+                // Roll back cumulative_duration so the next fragment
+                // re-accounts for this keyframe.
+                self.tracks[anchor].base.cumulative_duration = self.tracks[anchor]
+                    .base
+                    .cumulative_duration
+                    .saturating_sub(s.duration as u64);
+                detached.push((anchor, s, cenc));
             }
         }
 
@@ -1398,12 +1414,18 @@ fn build_init_moov(
     treps: &[crate::demux::TrepRecord],
     pssh: &[crate::cenc::PsshBox],
     write_mehd: bool,
+    movie_times: crate::demux::HeaderTimestamps,
 ) -> Result<(Vec<u8>, Option<usize>)> {
     // Movie timescale: pick 1000 (matches the non-fragmented path).
     let movie_timescale: u32 = 1000;
 
     let mut moov_body = Vec::new();
-    moov_body.extend_from_slice(&build_mvhd(movie_timescale, 0, (tracks.len() as u32) + 1));
+    moov_body.extend_from_slice(&build_mvhd(
+        movie_timescale,
+        0,
+        (tracks.len() as u32) + 1,
+        movie_times,
+    ));
     for t in tracks {
         // §8.6.6: explicit edit list for this track (stream index is
         // track_id - 1 — track IDs are assigned 1-based in open order).
@@ -1442,7 +1464,7 @@ fn build_trak_init(
     let mut body = Vec::new();
     // Duration is unknown at init time — use 0 so players read tfhd/trun
     // for actual timing. Per §8.2.2 a zero duration means "indefinite".
-    body.extend_from_slice(&build_tkhd(track_id, 0, &t.stream));
+    body.extend_from_slice(&build_tkhd(track_id, 0, &t.stream, t.tkhd_timestamps));
     // §8.6.5–6: a caller-supplied edit list goes between tkhd and mdia.
     // The §8.6.6.1 zero-duration form makes it cover the whole
     // fragmented presentation ("from media_time onwards").
@@ -2125,10 +2147,10 @@ fn build_sidx(
     body.extend_from_slice(&0u64.to_be_bytes()); // first_offset = 0
     body.extend_from_slice(&0u16.to_be_bytes()); // reserved
     body.extend_from_slice(&1u16.to_be_bytes()); // reference_count = 1
-                                                 // Per-reference 12-byte record:
-                                                 //   [bit 31] reference_type (0 = media), [bits 30..0] referenced_size
-                                                 //   subsegment_duration (u32)
-                                                 //   [bit 31] starts_with_SAP, [bits 30..28] SAP_type, [bits 27..0] SAP_delta_time
+    // Per-reference 12-byte record:
+    //   [bit 31] reference_type (0 = media), [bits 30..0] referenced_size
+    //   subsegment_duration (u32)
+    //   [bit 31] starts_with_SAP, [bits 30..28] SAP_type, [bits 27..0] SAP_delta_time
     let r0 = (referenced_size.min(0x7FFF_FFFF) as u32) & 0x7FFF_FFFF; // bit 31 = 0 (not sidx)
     body.extend_from_slice(&r0.to_be_bytes());
     body.extend_from_slice(&subsegment_duration.to_be_bytes());

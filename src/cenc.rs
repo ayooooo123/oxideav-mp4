@@ -78,6 +78,7 @@ use oxideav_core::{Error, Result};
 /// dedicated accessors so the caller does not have to re-read the
 /// FourCC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CencScheme {
     /// `cenc` — AES-CTR full-sample or video-NAL subsample encryption
     /// (§10.1). Counter mode. No pattern. Mandatory to support per
@@ -182,6 +183,7 @@ impl CencScheme {
 /// constant-IV vs no-IV configuration) so that a caller with a key
 /// blob in hand has a single typed value to switch on.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CencSchemeDecision {
     /// The parsed `scheme_type` from `sinf/schm`.
     pub scheme: CencScheme,
@@ -202,6 +204,7 @@ pub struct CencSchemeDecision {
 ///   `seig` group entry); no per-sample IV bytes are stored.
 /// * **None** (`isProtected == 0`) — the sample is unprotected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IvSupply {
     /// Per-sample IV stored on the wire; width is 8 or 16 bytes.
     PerSample { size: u8 },
@@ -228,15 +231,15 @@ impl CencSchemeDecision {
     /// consumer can then decide whether to refuse the file or treat it
     /// as a known-bad fixture.
     pub fn new(scheme: CencScheme, tenc: TencBox) -> Result<CencSchemeDecision> {
-        if let Some(req) = scheme.required_tenc_version() {
-            if tenc.version != req {
-                return Err(Error::invalid(format!(
-                    "CENC scheme decision: scheme {} requires tenc version {} but tenc.version = {}",
-                    fourcc_str(&scheme.fourcc()),
-                    req,
-                    tenc.version
-                )));
-            }
+        if let Some(req) = scheme.required_tenc_version()
+            && tenc.version != req
+        {
+            return Err(Error::invalid(format!(
+                "CENC scheme decision: scheme {} requires tenc version {} but tenc.version = {}",
+                fourcc_str(&scheme.fourcc()),
+                req,
+                tenc.version
+            )));
         }
         if scheme.uses_pattern_encryption()
             && tenc.default_crypt_byte_block == 0
@@ -1631,6 +1634,7 @@ pub enum CipherStepKind {
 /// list + sample length). The executing AES layer is
 /// [`crate::cenc_cipher::decrypt_steps_in_place`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CipherStep {
     /// Byte offset from the start of the sample payload.
     pub offset: u64,

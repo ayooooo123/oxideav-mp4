@@ -46,7 +46,12 @@ fn yuv_to_rgb(entry: u32) -> u32 {
 pub(crate) fn palette_extradata(clut: &[u8]) -> Vec<u8> {
     let entries: Vec<String> = clut
         .chunks_exact(4)
-        .map(|word| format!("{:06x}", yuv_to_rgb(u32::from_be_bytes([word[0], word[1], word[2], word[3]]))))
+        .map(|word| {
+            format!(
+                "{:06x}",
+                yuv_to_rgb(u32::from_be_bytes([word[0], word[1], word[2], word[3]]))
+            )
+        })
         .collect();
     format!("palette: {}\n", entries.join(", ")).into_bytes()
 }
@@ -61,9 +66,17 @@ mod tests {
         // every channel by one step.
         assert_eq!(yuv_to_rgb(0x0010_8080), 0x000000);
         assert_eq!(yuv_to_rgb(0x00EB_8080), 0xFEFEFE);
-        let table: Vec<u8> = (0..16u32).flat_map(|i| (0x0010_8080 + (i << 16)).to_be_bytes()).collect();
+        let table: Vec<u8> = (0..16u32)
+            .flat_map(|i| (0x0010_8080 + (i << 16)).to_be_bytes())
+            .collect();
         let text = String::from_utf8(palette_extradata(&table)).unwrap();
-        assert!(text.starts_with("palette: 000000, 000000, 010101, "), "{text}");
-        assert!(text.ends_with('\n') && text.matches(", ").count() == 15, "{text}");
+        assert!(
+            text.starts_with("palette: 000000, 000000, 010101, "),
+            "{text}"
+        );
+        assert!(
+            text.ends_with('\n') && text.matches(", ").count() == 15,
+            "{text}"
+        );
     }
 }

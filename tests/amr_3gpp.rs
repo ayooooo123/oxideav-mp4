@@ -12,7 +12,9 @@ struct Amr;
 
 impl CodecResolver for Amr {
     fn resolve_tag(&self, ctx: &ProbeContext) -> Option<CodecId> {
-        let CodecTag::Fourcc(fourcc) = ctx.tag else { return None };
+        let CodecTag::Fourcc(fourcc) = ctx.tag else {
+            return None;
+        };
         match fourcc {
             b"SAMR" => Some(CodecId::new("amr_nb")),
             b"SAWB" => Some(CodecId::new("amr_wb")),
@@ -45,15 +47,24 @@ fn amr_3gp(format: &[u8; 4], rate: u32) -> Vec<u8> {
     let moov = |offset: u32| {
         let mut stbl = full(b"stsd", &stsd);
         stbl.extend_from_slice(&full(b"stts", &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 160]));
-        stbl.extend_from_slice(&full(b"stsc", &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]));
+        stbl.extend_from_slice(&full(
+            b"stsc",
+            &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+        ));
         stbl.extend_from_slice(&full(b"stsz", &[0, 0, 0, 13, 0, 0, 0, 1]));
-        stbl.extend_from_slice(&full(b"stco", &[&1u32.to_be_bytes()[..], &offset.to_be_bytes()].concat()));
+        stbl.extend_from_slice(&full(
+            b"stco",
+            &[&1u32.to_be_bytes()[..], &offset.to_be_bytes()].concat(),
+        ));
         let mut minf = full(b"smhd", &[0u8; 4]);
         minf.extend_from_slice(&boxed(b"stbl", &stbl));
         let mut mdhd = vec![0u8; 20];
         mdhd[8..12].copy_from_slice(&rate.to_be_bytes());
         let mut mdia = full(b"mdhd", &mdhd);
-        mdia.extend_from_slice(&full(b"hdlr", &[&[0u8; 4][..], b"soun", &[0u8; 13]].concat()));
+        mdia.extend_from_slice(&full(
+            b"hdlr",
+            &[&[0u8; 4][..], b"soun", &[0u8; 13]].concat(),
+        ));
         mdia.extend_from_slice(&boxed(b"minf", &minf));
         let mut tkhd = vec![0u8; 80];
         tkhd[12..16].copy_from_slice(&1u32.to_be_bytes());
@@ -74,11 +85,19 @@ fn amr_3gp(format: &[u8; 4], rate: u32) -> Vec<u8> {
 
 #[test]
 fn amr_entries_are_mono_at_the_amr_rate() {
-    for (format, entry_rate, codec, rate) in [(b"samr", 8000, "amr_nb", 8000), (b"sawb", 16000, "amr_wb", 16000), (b"samr", 0, "amr_nb", 8000)] {
+    for (format, entry_rate, codec, rate) in [
+        (b"samr", 8000, "amr_nb", 8000),
+        (b"sawb", 16000, "amr_wb", 16000),
+        (b"samr", 0, "amr_nb", 8000),
+    ] {
         let input: Box<dyn ReadSeek> = Box::new(Cursor::new(amr_3gp(format, entry_rate)));
         let d = oxideav_mp4::demux::open(input, &Amr).expect("open");
         let params = &d.streams()[0].params;
         assert_eq!(params.codec_id.as_str(), codec);
-        assert_eq!((params.channels, params.sample_rate), (Some(1), Some(rate)), "{codec} entry at {entry_rate} Hz");
+        assert_eq!(
+            (params.channels, params.sample_rate),
+            (Some(1), Some(rate)),
+            "{codec} entry at {entry_rate} Hz"
+        );
     }
 }

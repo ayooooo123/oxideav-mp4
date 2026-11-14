@@ -166,7 +166,7 @@ fn samplerate_field(rate: u32) -> u32 {
         return rate;
     }
     (rate.div_ceil(0xFFFF).max(2)..=rate)
-        .find(|k| rate % k == 0)
+        .find(|k| rate.is_multiple_of(*k))
         .map_or(0, |k| rate / k)
 }
 
@@ -438,7 +438,9 @@ fn opus_entry(params: &CodecParameters) -> Result<SampleEntry> {
             }
             let mut dops = vec![0, head[1]];
             dops.extend_from_slice(&u16::from_le_bytes([head[2], head[3]]).to_be_bytes());
-            dops.extend_from_slice(&u32::from_le_bytes([head[4], head[5], head[6], head[7]]).to_be_bytes());
+            dops.extend_from_slice(
+                &u32::from_le_bytes([head[4], head[5], head[6], head[7]]).to_be_bytes(),
+            );
             dops.extend_from_slice(&u16::from_le_bytes([head[8], head[9]]).to_be_bytes());
             dops.extend_from_slice(&head[10..]);
             dops

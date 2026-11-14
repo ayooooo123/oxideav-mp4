@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `#[non_exhaustive]`: the muxer option records `Mp4MuxerOptions`, `FragmentedOptions`, `TrackSampleGroups`, `TrackEditList` and `TrackProtection`; the enums `BrandPreset`, `FragmentCadence`, `CencScheme`, `IvSupply`, `ItemProperty`, `ColrRecord`, `EmsgTime`, `SampleGroupGroupingType` and `SampleGroupEntry`; and every parsed box / demuxer record that callers only read (the `sidx` / `tfra` / `prft` / `amve` / `btrt` / `pdin` / `pnot` / `sbgp` / `sgpd` / `csgp` / `subs` / `saiz` / `saio` / `gmin` / `tcmi` / `load` / hint / FD-item / `meta` aggregate records, the `traf` SAI / sample-group / `senc` / `pssh` records, `MetaItems`, `PrftRequest`, `CencSchemeDecision`, `CipherStep` and the sample-group entry payloads). Code outside the crate builds the option records with `Default` plus the `with_*` setters and needs a `_ =>` arm when matching the enums. Box records that callers also build as muxer / packager inputs or test expectations (`TencBox`, `PsshBox`, `SeigEntry`, `SencBox` / `SencSample` / `SubsampleEntry`, the PIFF records, `EditListEntry`, `SampleToGroup`, `SampleGroupDescription`, `CompactSampleToGroup`, the `iloc` / `iinf` / `iref` / `ipma` / `grpl` records, `EmsgBox`, `StviRecord`, the `ssix` / `leva` / `assp` / `trep` / `pasp` / `clap` records), `SampleFlags`, `TrackKey`, `CipherMode` and `CipherStepKind` are unchanged.
+
+### Added
+
+- Regression test pinning the gapless case reported in #12: a 20000-sample 44.1 kHz M4A from macOS's AAC encoder reports 2112 priming + 20000 valid + 416 remainder (afinfo's numbers) through `gapless_timing`, the flat `gapless_*` options and the `----:com.apple.iTunes:iTunSMPB` metadata item (#12).
+- `TrackProtection::new(stream_index, scheme_type, scheme_version, tenc)`; `with_*` setters for every field of `Mp4MuxerOptions`, `FragmentedOptions`, `TrackSampleGroups`, `TrackEditList` and `TrackProtection`.
+
+## [0.0.11](https://github.com/OxideAV/oxideav-mp4/compare/v0.0.10...v0.0.11) - 2026-10-25
+
+### Added
+
+- expose explicit fragmented muxer flush
+
+### Fixed
+
+- fixup for #19: let-chain for clippy's collapsible_if, #[non_exhaustive] ChunkPolicy
+- fixup for #18: edit list anchored on the first DTS, DTS decode deltas, repeat_n
+- fixup for #17: #[non_exhaustive] MovieHeader, field docs, CHANGELOG
+- fixup for #16: ftyp reads only its major brand, #[non_exhaustive] track-table records, CHANGELOG
+- fixup for #15: QTFF citation + CHANGELOG entry for the sample-description terminator
+- fixup for #14: ALAC sample format from the cookie's bitDepth, CHANGELOG
+- fixup for #13: counts at the reported rate, flat gapless_* keys, #[non_exhaustive] records
+- fixup for #11: channelConfiguration 11-14, Table 1.23 citation, fmt, CHANGELOG
+- fixup for #10: CHANGELOG + README entry for the explicit fragment flush
+- fixup for #8: edition-2024 import order, #[non_exhaustive] header-timestamp records
+
+### Other
+
+- pixel_format for AV1 (av1C) and VP9 (first frame), frame_rate from sample durations
+- a chunk ends where another track's sample follows it; ChunkPolicy::PacketBoundaries
+- composition time offsets (ctts, cslg) from packet timestamps
+- the movie header's rate, volume and matrix, and a track header's layer, alternate group, volume and matrix
+- track header fields, stored sample entries and the media-timeline sample table
+- a QuickTime video sample description's four-byte terminator
+- an ALAC track's channel count and rate come from its ALACSpecificConfig
+- gapless audio timing from iTunSMPB or an edit list with a roll group (draft for #12)
+- an AAC track's channel count comes from its AudioSpecificConfig
+- header creation/modification timestamps, read and write
+- edition 2024, MSRV 1.95
+- PCM audio: ISO/IEC 23003-5 ipcm / fpcm mux + demux, QuickTime PCM demux; SPS-cropped sizes
+- report HE-AAC at the ASC's SBR output rate when mp4a carries the core rate
+- AAC carriage: bare access units + synthesised esds ASC; mov demuxer alias; pre-roll edit list
+- declare the H.264 / HEVC picture layout from avcC / hvcC
+- README install snippet drops the retired oxideav-codec/oxideav-container crates
+- README examples use the current registry API
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+
+### Added
+
+- The muxer writes composition time offsets (`ctts`) from the packets'
+  presentation and decode timestamps, version 1 when an offset is
+  negative, with a `cslg` (ISO/IEC 14496-12 §8.6.1.3-4). With offsets
+  present the automatic edit list is anchored on the first sample's
+  decode time, so a B-frame stream whose DTS starts below zero still
+  presents its first frame at 0; without packet durations, decode
+  deltas come from the DTS sequence rather than the reordered PTS.
+- `Mp4MuxerOptions::chunking`: `ChunkPolicy::PacketBoundaries` ends a
+  chunk after each packet with `flags.unit_boundary`.
+- Video streams declare `pixel_format` for AV1 (from `av1C`:
+  `high_bitdepth` / `twelve_bit` / `monochrome` / chroma subsampling)
+  and VP9 (from the first frame's uncompressed header, VP9 §6.2.2),
+  and for H.264 records without an SPS (`avc3`) from the
+  `AVCDecoderConfigurationRecord`'s high-profile `chroma_format` /
+  bit-depth fields (ISO/IEC 14496-15 §5.3.2.1.2).
+- Video streams declare `frame_rate` when every sample (bar the last
+  in decoding order) lasts the same, moov and fragment samples alike:
+  `timescale / duration`, reduced (30000/1001, 25/1, …).
+
+### Changed
+
+- edition 2024, MSRV 1.95
+
+### Fixed
+
+- A QuickTime video sample description ending in the optional
+  four-byte zero terminator (QTFF "Video Sample Description"; written
+  by AVAssetWriter after a ProRes entry's `colr` / `fiel`) no longer
+  fails the open as a truncated extension box.
+- A track's open chunk ends where another track's sample follows it in
+  `mdat`; interleaved tracks no longer get chunk offsets that skip the
+  other track's bytes.
+- An ALAC track's `channels`, `sample_rate` and `sample_format` come
+  from its ALACSpecificConfig cookie (`numChannels`, `sampleRate`,
+  `bitDepth`) rather than the `alac` entry's legacy fields, which
+  macOS's writer leaves at 2 / 44100 / 16 whatever the stream carries.
+- An AAC track's `channels` comes from its AudioSpecificConfig rather
+  than the `mp4a` entry's `channelcount` (which macOS's AAC writer sets
+  to 2 for mono and 5.1 alike): `channelConfiguration` 1-7 and 11-14
+  per ISO/IEC 14496-3 Table 1.23, or 2 for a mono core with parametric
+  stereo (AOT 29 or the §1.6.6 sync extension). Configuration 0 (PCE)
+  keeps the entry's count.
+
 ### Added
 
 - Video metadata derives AV1/VP9 pixel formats from codec configuration
@@ -53,10 +147,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Mp4Demuxer::movie_header()` (new `demux::MovieHeader`: `mvhd`
+  timescale, stored duration, preferred rate, volume and matrix), and
+  `TrackHeader` gains `tkhd`'s layer, alternate group, volume and
+  matrix — the display transform a rotated track declares.
+- Track-table accessors on `Mp4Demuxer`: `track_header(stream)` (new
+  `demux::TrackHeader`: `tkhd` track ID / flags / presentation size,
+  `hdlr` handler type, `mdhd` timescale / duration / packed language),
+  `movie_timescale()`, `major_brand()`, `is_fragmented()` (moov carries
+  an `mvex`), `sample_entry_count(stream)` / `sample_entry(stream,
+  index)` (new `demux::SampleEntry`: each `stsd` entry as stored) and
+  `samples(stream)` (new `demux::SampleInfo`: byte range, decode /
+  composition time on the media timeline before the edit list,
+  duration, sync flag, sample description index; sample table then
+  fragments, in decode order).
+- Gapless audio timing (#12): `Mp4Demuxer::gapless_timing(stream)`
+  returns a `demux::GaplessTiming` (priming, valid, remainder samples
+  at the stream's reported rate, plus its `GaplessSource`) from the M4A
+  `iTunSMPB` item, else from a single-entry `elst` on a track with an
+  AAC `roll` sample group; `None` otherwise. HE-AAC counts stored at the
+  core rate are scaled to the reported SBR output rate. Mirrored flat as
+  `gapless_priming` / `gapless_valid` / `gapless_remainder` /
+  `gapless_source` on the stream's options.
+- iTunes freeform `----` metadata items (`mean` / `name` / `data`) reach
+  `metadata()` as `----:<mean>:<name>`.
+- `FragmentedMuxer::flush_fragment()`: an explicit segment boundary for
+  callers that own the delivery cadence. Every pending sample (a
+  trailing keyframe included) goes into one `styp? + moof + mdat`
+  segment; a call with nothing pending is a no-op. The automatic
+  cadence path is unchanged.
 - Edit list for decode pre-roll: a track whose first packet has a
   negative PTS (e.g. AAC priming carried over from a trimmed source)
   gets one `elst` entry with `media_time = -first_pts` running to the
   end of the presented range.
+- Header timestamps on the muxer (ISO/IEC 14496-12 §8.2.2 `mvhd` / §8.3.2 `tkhd` / §8.4.2 `mdhd`), previously hardcoded to zero: `Mp4MuxerOptions::creation_time` stamps all three in the header epoch — seconds since 1904-01-01 UTC, converted by the public `mp4_secs_from_unix_secs` / `mp4_secs_from_system_time` (`None` before 1904), its inverse `unix_secs_from_mp4_secs`, and the `MP4_EPOCH_OFFSET_SECS` constant. One value fills both `creation_time` and `modification_time` of each box; `Mp4MuxerOptions::modification_time` drives them apart. `Mp4MuxerOptions::track_header_timestamps` (new `TrackHeaderTimestamps` record — `track` is the `tkhd` pair, `media` the `mdhd` one) replaces the pair for the stream it names rather than inheriting either half, `media: None` reusing `track` being the only defaulting step; `mvhd` keeps the movie-wide values and out-of-range indices fail at `open`. A value past 2040-02-06 in either half promotes that box to version 1 with 64-bit time + duration fields, per box and automatic. Plain, faststart and fragmented init-segment paths all honour it; the default `None` keeps the all-zero version-0 headers byte-identical to the historical output
+
+- Header-timestamp read side: `Mp4Demuxer::mvhd_timestamps()` / `::tkhd_timestamps(stream)` / `::mdhd_timestamps(stream)` return the new `demux::HeaderTimestamps` (`creation_time` + `modification_time`, `is_unset()` for the all-zero encoding; re-exported at the crate root, since the muxer options take it too) in the boxes' own units, so a value read here feeds straight back into the muxer — the two surfaces reach the same six fields, making a remux carry-across lossless. `tkhd` and `mdhd` stay separate rather than collapsing, since a producer may date the media apart from the track; v0 and v1 layouts both widen to `u64`, read by one shared reader for all three boxes. Flat metadata mirrors as `mvhd_creation_time` / `mvhd_modification_time` and the per-stream `tkhd_*` / `mdhd_*`, emitted only when non-zero so an unstamped file adds no keys. 15 integration tests (six distinct values byte-patched into the six fields, so a swapped or shared read cannot pass; a PATH-gated cross-check reading back a stamp written by `ffmpeg`; v1 promotion across the plain, faststart and fragmented paths)
+- `HeaderTimestamps` and `TrackHeaderTimestamps` are `#[non_exhaustive]`; build them with `HeaderTimestamps::new` / `::stamped` / `with_creation_time` / `with_modification_time` and `TrackHeaderTimestamps::new` / `with_media`.
+
 - Audio encoder delay and end padding per packet, as
   `Demuxer::packet_metadata().audio_trim` in the media timescale, with
   FFmpeg's (2da55bf mov.c / demux.c) values: the first non-empty edit's

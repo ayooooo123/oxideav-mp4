@@ -19,6 +19,7 @@
 /// * [`Ismv`](BrandPreset::Ismv): `iso4` / `iso4 piff iso6 isml`
 /// * [`Custom`](BrandPreset::Custom): caller-supplied major + compatible list
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum BrandPreset {
     /// Standard MP4 — `major=mp42`, compatible=`isom mp42 mp41 iso2`.
     Mp4,
@@ -61,6 +62,7 @@ impl BrandPreset {
 /// In a true CMAF / DASH `init+seg*` workflow each `moof+mdat` becomes one
 /// addressable HTTP range; the cadence picks how big each one is.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum FragmentCadence {
     /// Flush whenever the running fragment duration of the *first* track
     /// (typically video) reaches `seconds`. Falls back to per-track total
@@ -96,6 +98,7 @@ pub enum FragmentCadence {
 /// matching ISO/IEC 14496-12 §8.8 (Movie Fragments) + §8.16 (sidx) + §8.8.10
 /// (mfra) + DASH-IF Interop guidelines for `styp` brands.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct FragmentedOptions {
     /// When to flush a fragment; see [`FragmentCadence`].
     pub cadence: FragmentCadence,
@@ -209,6 +212,56 @@ pub struct FragmentedOptions {
     pub write_mehd: bool,
 }
 
+impl FragmentedOptions {
+    /// Set `cadence`.
+    pub fn with_cadence(mut self, cadence: FragmentCadence) -> Self {
+        self.cadence = cadence;
+        self
+    }
+
+    /// Set `styp`.
+    pub fn with_styp(mut self, styp: Option<BrandPreset>) -> Self {
+        self.styp = styp;
+        self
+    }
+
+    /// Set `emit_random_access_indexes`.
+    pub fn with_emit_random_access_indexes(mut self, emit_random_access_indexes: bool) -> Self {
+        self.emit_random_access_indexes = emit_random_access_indexes;
+        self
+    }
+
+    /// Set `levels`.
+    pub fn with_levels(mut self, levels: Vec<crate::demux::LevaEntry>) -> Self {
+        self.levels = levels;
+        self
+    }
+
+    /// Set `emit_ssix`.
+    pub fn with_emit_ssix(mut self, emit_ssix: bool) -> Self {
+        self.emit_ssix = emit_ssix;
+        self
+    }
+
+    /// Set `ssix_levels`.
+    pub fn with_ssix_levels(mut self, ssix_levels: (u8, u8)) -> Self {
+        self.ssix_levels = ssix_levels;
+        self
+    }
+
+    /// Set `treps`.
+    pub fn with_treps(mut self, treps: Vec<crate::demux::TrepRecord>) -> Self {
+        self.treps = treps;
+        self
+    }
+
+    /// Set `write_mehd`.
+    pub fn with_write_mehd(mut self, write_mehd: bool) -> Self {
+        self.write_mehd = write_mehd;
+        self
+    }
+}
+
 impl Default for FragmentedOptions {
     fn default() -> Self {
         Self {
@@ -245,6 +298,7 @@ impl Default for FragmentedOptions {
 /// with a given `grouping_type` may exist per track"); a caller picks
 /// one form per `grouping_type` and never both.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct TrackSampleGroups {
     /// Index into the muxer's `streams` slice (the stream slot that
     /// owns these groups).
@@ -259,6 +313,32 @@ pub struct TrackSampleGroups {
     /// and they follow any `sbgp`. Use `csgp` *or* `sbgp` for a given
     /// `grouping_type`, never both.
     pub csgp: Vec<crate::sample_groups::CompactSampleToGroup>,
+}
+
+impl TrackSampleGroups {
+    /// Set `stream_index`.
+    pub fn with_stream_index(mut self, stream_index: usize) -> Self {
+        self.stream_index = stream_index;
+        self
+    }
+
+    /// Set `sbgp`.
+    pub fn with_sbgp(mut self, sbgp: Vec<crate::sample_groups::SampleToGroup>) -> Self {
+        self.sbgp = sbgp;
+        self
+    }
+
+    /// Set `sgpd`.
+    pub fn with_sgpd(mut self, sgpd: Vec<crate::sample_groups::SampleGroupDescription>) -> Self {
+        self.sgpd = sgpd;
+        self
+    }
+
+    /// Set `csgp`.
+    pub fn with_csgp(mut self, csgp: Vec<crate::sample_groups::CompactSampleToGroup>) -> Self {
+        self.csgp = csgp;
+        self
+    }
 }
 
 /// An explicit per-track edit list for the muxer (ISO/IEC 14496-12
@@ -282,12 +362,27 @@ pub struct TrackSampleGroups {
 /// movie timescale 1000) while `media_time` is in the track's media
 /// timescale.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct TrackEditList {
     /// Index into the muxer's `streams` slice (the stream slot that
     /// owns this edit list).
     pub stream_index: usize,
     /// The `elst` entries, emitted in order.
     pub entries: Vec<crate::demux::EditListEntry>,
+}
+
+impl TrackEditList {
+    /// Set `stream_index`.
+    pub fn with_stream_index(mut self, stream_index: usize) -> Self {
+        self.stream_index = stream_index;
+        self
+    }
+
+    /// Set `entries`.
+    pub fn with_entries(mut self, entries: Vec<crate::demux::EditListEntry>) -> Self {
+        self.entries = entries;
+        self
+    }
 }
 
 /// Per-track CENC protection signalling for the muxer (ISO/IEC
@@ -309,6 +404,7 @@ pub struct TrackEditList {
 /// pair) and carries the per-sample IVs / subsample maps through its
 /// own `senc` / `saiz` / `saio` channel.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct TrackProtection {
     /// Index into the muxer's `streams` slice (the stream to protect).
     pub stream_index: usize,
@@ -327,11 +423,199 @@ pub struct TrackProtection {
     pub tenc: crate::cenc::TencBox,
 }
 
+impl TrackProtection {
+    /// Build a record from its mandatory fields.
+    pub fn new(
+        stream_index: usize,
+        scheme_type: [u8; 4],
+        scheme_version: u32,
+        tenc: crate::cenc::TencBox,
+    ) -> Self {
+        Self {
+            stream_index,
+            scheme_type,
+            scheme_version,
+            tenc,
+        }
+    }
+
+    /// Set `stream_index`.
+    pub fn with_stream_index(mut self, stream_index: usize) -> Self {
+        self.stream_index = stream_index;
+        self
+    }
+
+    /// Set `scheme_type`.
+    pub fn with_scheme_type(mut self, scheme_type: [u8; 4]) -> Self {
+        self.scheme_type = scheme_type;
+        self
+    }
+
+    /// Set `scheme_version`.
+    pub fn with_scheme_version(mut self, scheme_version: u32) -> Self {
+        self.scheme_version = scheme_version;
+        self
+    }
+
+    /// Set `tenc`.
+    pub fn with_tenc(mut self, tenc: crate::cenc::TencBox) -> Self {
+        self.tenc = tenc;
+        self
+    }
+}
+
+/// Seconds between the ISO/IEC 14496-12 epoch (1904-01-01 00:00:00 UTC,
+/// the QuickTime/ISOBMFF header-timestamp origin) and the Unix epoch
+/// (1970-01-01 00:00:00 UTC).
+///
+/// Header timestamps (`mvhd` / `tkhd` / `mdhd` `creation_time` and
+/// `modification_time`) count seconds from the *1904* origin, so a Unix
+/// timestamp has to be shifted by this constant before it goes into a
+/// box. [`mp4_secs_from_unix_secs`] does that with the range checks.
+///
+/// Note the unit: these three header fields count *seconds*. The
+/// ISO/IEC 23008-12 item properties `crtt` / `mdft` share the same 1904
+/// origin but count **microseconds**, so this constant does not convert
+/// them.
+pub const MP4_EPOCH_OFFSET_SECS: u64 = 2_082_844_800;
+
+/// Convert a Unix timestamp (seconds since 1970-01-01 UTC) into the
+/// ISO/IEC 14496-12 header form (seconds since 1904-01-01 UTC) for
+/// [`Mp4MuxerOptions::creation_time`].
+///
+/// Returns `None` for instants before 1904-01-01, which the unsigned
+/// box field cannot represent. [`unix_secs_from_mp4_secs`] is the
+/// inverse, for timestamps read back off a file.
+pub fn mp4_secs_from_unix_secs(unix_secs: i64) -> Option<u64> {
+    // i128 keeps the add exact for every i64 input; the result is then
+    // range-checked back into the unsigned box field.
+    let shifted = unix_secs as i128 + MP4_EPOCH_OFFSET_SECS as i128;
+    u64::try_from(shifted).ok()
+}
+
+/// Convert an ISO/IEC 14496-12 header timestamp (seconds since
+/// 1904-01-01 UTC, as carried by `mvhd` / `tkhd` / `mdhd` and surfaced
+/// by the demuxer's header-timestamp accessors) back to a Unix
+/// timestamp.
+///
+/// Never fails: values above `i64::MAX + MP4_EPOCH_OFFSET_SECS`
+/// saturate at `i64::MAX` rather than wrapping. The inverse of
+/// [`mp4_secs_from_unix_secs`].
+pub fn unix_secs_from_mp4_secs(mp4_secs: u64) -> i64 {
+    // Only the top needs clamping: shifting a u64 down by the offset
+    // floors the result at -MP4_EPOCH_OFFSET_SECS, so the i64 lower
+    // bound cannot be reached.
+    let shifted = mp4_secs as i128 - MP4_EPOCH_OFFSET_SECS as i128;
+    shifted.min(i64::MAX as i128) as i64
+}
+
+/// Convert a [`std::time::SystemTime`] into the ISO/IEC 14496-12 header
+/// form (seconds since 1904-01-01 UTC) for
+/// [`Mp4MuxerOptions::creation_time`].
+///
+/// Sub-second precision is floored — the whole-second field always
+/// names the second the instant falls *inside*, on both sides of 1970.
+/// Returns `None` for instants before 1904-01-01.
+pub fn mp4_secs_from_system_time(t: std::time::SystemTime) -> Option<u64> {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => MP4_EPOCH_OFFSET_SECS.checked_add(d.as_secs()),
+        // Before 1970: representable only if it is still at or after
+        // 1904. `e.duration()` counts *backwards* from the Unix epoch,
+        // so a sub-second remainder means the instant sits one second
+        // earlier than `as_secs()` alone would say — subtract it to
+        // floor rather than round toward the future.
+        Err(e) => {
+            let back = e.duration();
+            let secs = back
+                .as_secs()
+                .saturating_add(u64::from(back.subsec_nanos() > 0));
+            MP4_EPOCH_OFFSET_SECS.checked_sub(secs)
+        }
+    }
+}
+
+/// A per-track override for the header timestamps (ISO/IEC 14496-12
+/// §8.3.2 `tkhd` / §8.4.2 `mdhd`).
+///
+/// When a [`Mp4MuxerOptions::track_header_timestamps`] entry targets a
+/// stream, that track's `tkhd` and `mdhd` carry these timestamps
+/// instead of the movie-wide [`Mp4MuxerOptions::creation_time`] /
+/// [`Mp4MuxerOptions::modification_time`]. The movie header (`mvhd`)
+/// is unaffected — it only ever carries the movie-wide values. Tracks
+/// with no entry keep the movie-wide values.
+///
+/// All values are in the header epoch: seconds since 1904-01-01 UTC
+/// (see [`mp4_secs_from_unix_secs`]).
+///
+/// An entry is read as written — there is no per-field inheritance from
+/// the movie-wide values. [`Self::track`] *is* the `tkhd` pair, and
+/// [`Self::media`] is the `mdhd` pair when it carries one. The only
+/// defaulting is the common case of a track whose media shares its
+/// track's instants: `media: None` reuses [`Self::track`] rather than
+/// making callers write the same pair twice.
+///
+/// A track that wants the movie-wide values in one box and its own in
+/// the other spells both out — e.g. `track: movie_pair` alongside a
+/// `media` override, rather than leaving a field unset and relying on
+/// where it inherits from.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct TrackHeaderTimestamps {
+    /// Index into the muxer's `streams` slice (the stream these
+    /// timestamps apply to). Out-of-range indices fail at `open`.
+    pub stream_index: usize,
+    /// The §8.3.2 `tkhd` pair for this track, verbatim. The all-zero
+    /// [`HeaderTimestamps::default`](crate::demux::HeaderTimestamps)
+    /// is a real "unstamped" value, not "inherit the movie's".
+    pub track: crate::demux::HeaderTimestamps,
+    /// The §8.4.2 `mdhd` pair, for a source whose *media* was created
+    /// or last modified at a different instant from the track that
+    /// carries it (§8.4.2 dates the media, §8.3.2 the track — a
+    /// producer may legitimately stamp them apart). `None` — the
+    /// common case — reuses [`Self::track`].
+    pub media: Option<crate::demux::HeaderTimestamps>,
+}
+
+impl TrackHeaderTimestamps {
+    /// An override for `stream_index` whose `tkhd` carries `track` and
+    /// whose `mdhd` reuses it (`media: None`).
+    pub fn new(stream_index: usize, track: crate::demux::HeaderTimestamps) -> Self {
+        Self {
+            stream_index,
+            track,
+            media: None,
+        }
+    }
+
+    /// Date the `mdhd` apart from the `tkhd`.
+    pub fn with_media(mut self, media: crate::demux::HeaderTimestamps) -> Self {
+        self.media = Some(media);
+        self
+    }
+}
+
+/// How the non-fragmented muxer groups a track's samples into chunks
+/// (ISO/IEC 14496-12 §8.7.4). Whatever the policy, a chunk also ends
+/// when another track's sample is written after it, since a chunk is a
+/// contiguous run of one track's samples.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChunkPolicy {
+    /// About one second of compressed audio (50 samples), one sample of
+    /// video or PCM, per chunk.
+    #[default]
+    SampleCount,
+    /// A chunk ends after each packet whose `flags.unit_boundary` is set,
+    /// so the caller decides the interleave and the chunk sizes.
+    PacketBoundaries,
+}
+
 /// Runtime options controlling how the MP4 muxer shapes its output.
 ///
 /// Call [`Mp4MuxerOptions::default`] for the historical behavior of the
 /// plain `"mp4"` registry entry (major=`mp42`, no faststart, no fragmentation).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Mp4MuxerOptions {
     /// `ftyp` brand preset written at the beginning of the file.
     pub brand: BrandPreset,
@@ -398,6 +682,45 @@ pub struct Mp4MuxerOptions {
     /// envelope. See [`TrackProtection`] for the caller's encryption
     /// responsibilities.
     pub track_protection: Vec<TrackProtection>,
+    /// Header creation timestamp written into `mvhd` (§8.2.2), `tkhd`
+    /// (§8.3.2) and `mdhd` (§8.4.2), in **seconds since 1904-01-01
+    /// UTC** — the ISOBMFF header epoch, not the Unix one. Build the
+    /// value with [`mp4_secs_from_unix_secs`] /
+    /// [`mp4_secs_from_system_time`] rather than by hand.
+    ///
+    /// `None` (the default) leaves the creation half zero — the
+    /// historical behaviour and the §8.2.2 "unset" reading; the header
+    /// is all-zero only when nothing else stamps it, since
+    /// [`Self::modification_time`] and the per-track entries are
+    /// written independently. `Some(t)` writes `t` into both
+    /// `creation_time` and `modification_time` of all three headers,
+    /// matching `ffmpeg -metadata creation_time=…`; set
+    /// [`Self::modification_time`] to drive the two apart, and
+    /// [`Self::track_header_timestamps`] to override `tkhd` / `mdhd`
+    /// per track.
+    ///
+    /// A timestamp past 2040-02-06 exceeds `u32::MAX` and so cannot fit
+    /// the version-0 layout; the affected box is promoted to version 1
+    /// (64-bit time and duration fields) automatically, per box.
+    pub creation_time: Option<u64>,
+    /// Header modification timestamp for `mvhd` / `tkhd` / `mdhd`, in
+    /// seconds since 1904-01-01 UTC.
+    ///
+    /// `None` (the default) reuses [`Self::creation_time`] — a freshly
+    /// written file is created and last modified at one instant. Set
+    /// it when the two differ, e.g. a remux preserving a source's
+    /// history. Drives the version-1 promotion the same way
+    /// `creation_time` does, and is written even when `creation_time`
+    /// is `None`: the resulting `creation = 0, modification = t` is a
+    /// shape real files carry and the demuxer reports.
+    pub modification_time: Option<u64>,
+    /// Per-track overrides for the `tkhd` / `mdhd` timestamps. Empty by
+    /// default — [`Self::creation_time`] covers the common case of one
+    /// instant for the whole movie. An entry replaces both halves of
+    /// the pair for the track it names, rather than inheriting either
+    /// from the movie-wide values. First matching entry per stream
+    /// wins; see [`TrackHeaderTimestamps`].
+    pub track_header_timestamps: Vec<TrackHeaderTimestamps>,
     /// `pssh` (ProtectionSystemSpecificHeaderBox, ISO/IEC 23001-7
     /// §8.1) boxes emitted at `moov` level, after the `trak` boxes —
     /// one per DRM system the content keys are provisioned for.
@@ -407,6 +730,91 @@ pub struct Mp4MuxerOptions {
     /// `write_trailer` (non-fragmented) / `write_header` (fragmented
     /// init segment) rather than emitting a malformed box.
     pub pssh: Vec<crate::cenc::PsshBox>,
+    /// How samples are grouped into chunks (non-fragmented output).
+    pub chunking: ChunkPolicy,
+}
+
+impl Mp4MuxerOptions {
+    /// Set `brand`.
+    pub fn with_brand(mut self, brand: BrandPreset) -> Self {
+        self.brand = brand;
+        self
+    }
+
+    /// Set `faststart`.
+    pub fn with_faststart(mut self, faststart: bool) -> Self {
+        self.faststart = faststart;
+        self
+    }
+
+    /// Set `fragmented`.
+    pub fn with_fragmented(mut self, fragmented: Option<FragmentedOptions>) -> Self {
+        self.fragmented = fragmented;
+        self
+    }
+
+    /// Set `write_edit_list`.
+    pub fn with_write_edit_list(mut self, write_edit_list: bool) -> Self {
+        self.write_edit_list = write_edit_list;
+        self
+    }
+
+    /// Set `track_sample_groups`.
+    pub fn with_track_sample_groups(mut self, track_sample_groups: Vec<TrackSampleGroups>) -> Self {
+        self.track_sample_groups = track_sample_groups;
+        self
+    }
+
+    /// Set `track_edit_lists`.
+    pub fn with_track_edit_lists(mut self, track_edit_lists: Vec<TrackEditList>) -> Self {
+        self.track_edit_lists = track_edit_lists;
+        self
+    }
+
+    /// Set `large_mdat`.
+    pub fn with_large_mdat(mut self, large_mdat: bool) -> Self {
+        self.large_mdat = large_mdat;
+        self
+    }
+
+    /// Set `track_protection`.
+    pub fn with_track_protection(mut self, track_protection: Vec<TrackProtection>) -> Self {
+        self.track_protection = track_protection;
+        self
+    }
+
+    /// Set `creation_time`.
+    pub fn with_creation_time(mut self, creation_time: Option<u64>) -> Self {
+        self.creation_time = creation_time;
+        self
+    }
+
+    /// Set `modification_time`.
+    pub fn with_modification_time(mut self, modification_time: Option<u64>) -> Self {
+        self.modification_time = modification_time;
+        self
+    }
+
+    /// Set `track_header_timestamps`.
+    pub fn with_track_header_timestamps(
+        mut self,
+        track_header_timestamps: Vec<TrackHeaderTimestamps>,
+    ) -> Self {
+        self.track_header_timestamps = track_header_timestamps;
+        self
+    }
+
+    /// Set `pssh`.
+    pub fn with_pssh(mut self, pssh: Vec<crate::cenc::PsshBox>) -> Self {
+        self.pssh = pssh;
+        self
+    }
+
+    /// Set `chunking`.
+    pub fn with_chunking(mut self, chunking: ChunkPolicy) -> Self {
+        self.chunking = chunking;
+        self
+    }
 }
 
 impl Default for Mp4MuxerOptions {
@@ -420,7 +828,76 @@ impl Default for Mp4MuxerOptions {
             track_edit_lists: Vec::new(),
             large_mdat: false,
             track_protection: Vec::new(),
+            creation_time: None,
+            modification_time: None,
+            track_header_timestamps: Vec::new(),
             pssh: Vec::new(),
+            chunking: ChunkPolicy::default(),
         }
+    }
+}
+
+impl Mp4MuxerOptions {
+    /// The `mvhd` (§8.2.2) pair. Movie-wide values only — a per-track
+    /// override never reaches the movie header. Unset collapses to 0,
+    /// the "not stamped" encoding.
+    pub(crate) fn resolve_movie_timestamps(&self) -> crate::demux::HeaderTimestamps {
+        crate::demux::HeaderTimestamps {
+            creation_time: self.creation_time.unwrap_or(0),
+            // A modification time set without a creation time is
+            // unusual but representable, and real files carry the
+            // shape — so write it rather than second-guessing.
+            modification_time: self.modification_time.or(self.creation_time).unwrap_or(0),
+        }
+    }
+
+    /// The `tkhd` (§8.3.2) pair for one track: the entry's `track`
+    /// pair verbatim when one targets this stream, else the movie-wide
+    /// pair.
+    pub(crate) fn resolve_track_timestamps(
+        &self,
+        stream_index: usize,
+    ) -> crate::demux::HeaderTimestamps {
+        match self.track_entry(stream_index) {
+            Some(e) => e.track,
+            None => self.resolve_movie_timestamps(),
+        }
+    }
+
+    /// The `mdhd` (§8.4.2) pair for one track: the entry's `media`
+    /// override if it carries one, else the same pair its `tkhd` got.
+    pub(crate) fn resolve_media_timestamps(
+        &self,
+        stream_index: usize,
+    ) -> crate::demux::HeaderTimestamps {
+        match self.track_entry(stream_index) {
+            Some(e) => e.media.unwrap_or(e.track),
+            None => self.resolve_movie_timestamps(),
+        }
+    }
+
+    /// First [`TrackHeaderTimestamps`] targeting `stream_index`, if any.
+    fn track_entry(&self, stream_index: usize) -> Option<&TrackHeaderTimestamps> {
+        self.track_header_timestamps
+            .iter()
+            .find(|c| c.stream_index == stream_index)
+    }
+
+    /// Reject [`TrackHeaderTimestamps`] entries that name a stream slot
+    /// that does not exist, at `open` rather than silently dropping
+    /// the override at `write_trailer`.
+    pub(crate) fn validate_track_header_timestamps(
+        &self,
+        stream_count: usize,
+    ) -> oxideav_core::Result<()> {
+        for c in &self.track_header_timestamps {
+            if c.stream_index >= stream_count {
+                return Err(oxideav_core::Error::invalid(format!(
+                    "mp4 muxer: track_header_timestamps stream_index {} out of range ({} streams)",
+                    c.stream_index, stream_count
+                )));
+            }
+        }
+        Ok(())
     }
 }
